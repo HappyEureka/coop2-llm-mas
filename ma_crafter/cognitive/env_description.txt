@@ -1,0 +1,175 @@
+MA-Crafter Environment Specification
+
+## GOAL
+
+Your team's objective is to **collect a diamond**. It does not matter which agent collects it - as long as any agent on the team successfully collects a diamond, the goal is achieved.
+
+### Diamond Collection Dependency Chain
+
+To collect a diamond, you need an iron_pickaxe. Here is the full dependency tree:
+
+```
+diamond (requires iron_pickaxe)
+└── iron_pickaxe (craft at furnace, uses: 1 iron + 1 coal + 1 wood)
+    ├── iron (requires stone_pickaxe)
+    │   └── stone_pickaxe (craft at table, uses: 1 stone + 1 wood)
+    │       ├── stone (requires wood_pickaxe)
+    │       │   └── wood_pickaxe (craft at table, uses: 1 wood)
+    │       │       └── wood (no tool required)
+    │       └── wood (no tool required)
+    ├── coal (requires wood_pickaxe)
+    │   └── wood_pickaxe (craft at table, uses: 1 wood)
+    │       └── wood (no tool required)
+    ├── wood (no tool required)
+    └── furnace (place, uses: 4 stone)
+        └── stone (requires wood_pickaxe)
+            └── wood_pickaxe (craft at table, uses: 1 wood)
+                └── wood (no tool required)
+```
+
+### Minimum Steps (Single Agent Path):
+1. Collect wood (for wood_pickaxe)
+2. Place table
+3. Craft wood_pickaxe at table
+4. Collect stone (with wood_pickaxe) - need enough for stone_pickaxe + furnace
+5. Craft stone_pickaxe at table
+6. Place furnace
+7. Collect coal (with wood_pickaxe)
+8. Collect iron (with stone_pickaxe)
+9. Craft iron_pickaxe at furnace
+10. Collect diamond (with iron_pickaxe)
+
+### Cooperative Strategy:
+With multiple agents, you can parallelize tasks. For example:
+- One agent collects wood while another scouts for resources
+- Agents can share resources to help each other craft tools faster
+- Multiple agents may be required to collect certain resources (check COOPERATIVE CONFIGURATION)
+
+
+## Section 0: Cooperative Configuration
+
+The environment uses a configuration file that defines cooperative requirements for each resource.
+This configuration is provided in your observation at each step as "COOPERATIVE CONFIGURATION".
+
+Key parameters:
+- Distance threshold: Maximum distance (in tiles) for an agent to be considered "near" a resource
+- Resource requirements: For each resource type:
+  - required_agents: Minimum number of agents needed to collect (all must be within distance and issue collect action)
+  - required_tool: Tool that ALL participating agents must have (null = no tool needed)
+
+Example: If "tree" requires 2 agents, then 2 agents must be within the distance threshold and both must issue "collect" action simultaneously to successfully collect wood.
+
+IMPORTANT: Always check the COOPERATIVE CONFIGURATION in your observation to know the current requirements. Different levels have different requirements:
+- Level 1: Most resources require only 1 agent
+- Level 2: Most resources require 2 agents
+- Level 3: Resources require varying numbers of agents (up to 3)
+
+
+## Section 1: Available Actions
+
+### Action: noop
+Does nothing for the current step. Used to skip an action or remain idle.
+
+### Action: move
+Moves the agent one step in the specified direction.
+Use this to explore the environment when you don't know where resources are.
+If an object's ID is unknown, move around to discover it first, then use navigate.
+Placed utilities use readable local IDs in SYMBOLIC VIEW, such as table 1, table 2, furnace 1.
+To navigate to table 1, use navigate with object_type="table" and item_id=1.
+
+### Action: navigate (multi-step)
+Moves the agent over multiple steps to reach the specified target by their id.
+Fails if object type and object id mismatch or object id does not exist.
+The agent stops when it is close enough to interact with the target; facing direction is not required.
+
+### Action: sleep (multi-step)
+Puts the agent to sleep for a multi-step duration and will only wake up if energy is fully recovered.
+Useful to regain energy.
+
+### Action: place
+Places an object of the specified type into a valid nearby tile.
+Placement is symbolic; you do not need to manage facing direction.
+If placement succeeds, the placed utility appears with a readable ID such as table 1 or furnace 1.
+
+### Action: craft
+Creates a new item using resources from your bag.
+Conditions:
+- You must be near the required tool station, such as a table or furnace.
+- You must have the recipe resources in your inventory.
+- Crafting does not require partners unless a topology directive says to coordinate inventory/tool progress.
+
+### Action: collect
+Collects a resource from the environment.
+Conditions:
+- Agent MUST be nearby the resource to collect it. Use navigate to get close first.
+- At least x agents must be within distance d of the object (check COOPERATIVE CONFIGURATION).
+- All participating agents must perform the collect action at the same time.
+- The resource is added to the leader's bag (if the bag has space).
+Usage:
+1. If you know the object's ID (from SYMBOLIC VIEW): use navigate(object_type, object_id) to move next to it
+2. If you don't know the object's ID: use move to explore until you see it in SYMBOLIC VIEW
+3. Once nearby, use collect to gather the resource
+
+### Action: share
+Transfers resources from your inventory to another agent.
+Parameters:
+- recipient_agent_id: The agent ID to share with (e.g., "agent_0")
+- resource_type: The type of resource to share (e.g., "wood", "stone")
+- quantity: The amount to transfer
+Conditions:
+- You must have the resource in your inventory.
+- Cannot share health.
+- Cannot share with yourself.
+
+### Bag Capacity Note:
+Each resource has a weight. Agents have a max carrying capacity.
+Ensure total weight does not exceed capacity when collecting or sharing resources.
+
+
+
+## Section 2: Crafting Prerequisites and Hierarchy
+
+Collecting Resources:
+- cow: navigate to cow, then collect (restores food)
+- drink (water): navigate to water, then collect (restores drink)
+- wood: navigate to tree, then collect (no tool required)
+- stone: navigate to stone, then collect (requires wood_pickaxe)
+- coal: navigate to coal, then collect (requires wood_pickaxe)
+- iron: navigate to iron, then collect (requires stone_pickaxe)
+- diamond: navigate to diamond, then collect (requires iron_pickaxe)
+
+Placing Structures:
+- table: consumes 2 wood; must be on grass
+- furnace: consumes 4 stone
+
+Crafting Tools (must be near required station):
+- wood_pickaxe: crafted at table; uses 1 wood
+- stone_pickaxe: crafted at table; uses 1 stone and 1 wood
+- iron_pickaxe: crafted at furnace; uses 1 iron, 1 coal, and 1 wood
+
+
+
+## Section 3: World Rules
+
+Resource Collection:
+1. Satisfy prerequisites (tools and materials).
+2. Navigate to the resource using navigate.
+3. Use the collect action.
+
+Tool Crafting:
+1. For the first wood_pickaxe, collect 3 wood if no table is nearby.
+2. Place table using 2 wood.
+3. Craft wood_pickaxe near the table using 1 wood.
+4. Use readable utility IDs like table 1 when returning to a placed table.
+
+General Rule:
+1. Be cooperative and you can ask others for help and when other ask you you should try to help if you can.
+2. Your collaborating agents should not include yourself.
+3. Try working with no more agents than needed.
+
+Agent Health:
+- High numbers mean better condition.
+- To replenish:
+  - Low hunger: collect cow
+  - Low drink: collect water
+  - Low energy: sleep

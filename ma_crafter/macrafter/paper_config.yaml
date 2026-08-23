@@ -1,0 +1,52 @@
+# MA-Crafter cooperative task configuration used in the COOP² paper.
+# Resource constraints become progressively harder across the technology tree.
+
+cooperative_collection:
+  enabled: true
+  distance_threshold: 1
+
+  resources:
+    tree:
+      required_agents: 1
+      required_tool: null
+
+    stone:
+      required_agents: 1
+      required_tool: wood_pickaxe
+
+    coal:
+      required_agents: 2
+      required_tool: wood_pickaxe
+
+    iron:
+      required_agents: 3
+      required_tool: stone_pickaxe
+
+    diamond:
+      required_agents: 3
+      required_tool: iron_pickaxe
+
+team_score:
+  enabled: true
+  terminate_on_diamond: false
+  wall_clock_limit_seconds: 120
+  score_lifetime_collections: true
+  score_shared_resources_per_agent: true
+  scale_by_required_agents: true
+  tool_tier_bonus: 0.5
+  base_values:
+    wood: 1
+    stone: 10
+    coal: 25
+    iron: 25
+    diamond: 80
+
+coop2_repair:
+  spatial_tolerance: 1
+  temporal_tolerance: 2
+  task_cooldown_steps: 20
+  cooldown_scope: target_type
+
+task_tracking:
+  enabled: true
+  track_history: true

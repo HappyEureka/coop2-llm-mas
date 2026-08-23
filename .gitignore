@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+
+# Generated experiment artifacts
+results/
+results-old/
+experiment/results/
+experiment/results-old/
+
+# Generated paper figures/tables can be recreated from traces.
+figs/
+*.log

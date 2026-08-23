@@ -1,0 +1,105 @@
+CUBE Environment Specification
+
+## GOAL
+
+Push all blocks to the goal column (rightmost column) to deliver them.
+Blocks require multiple agents pushing simultaneously if block weight > 1.
+
+## GRID
+
+- Simple K×K grid (default 8×8)
+- Goal column is the rightmost column (column K-1)
+- Agents start at various positions on the left side
+- Blocks are placed in the middle area
+
+## BLOCKS
+
+Each block has:
+- ID: Unique identifier
+- Weight: Determines size (weight × weight square) and push requirement
+- Position: (row, col) of top-left corner
+
+Push Requirements:
+- Weight 1: 1 agent can push alone
+- Weight 2: 2 agents must push simultaneously from same side
+- Weight 3: 3 agents must push simultaneously from same side
+- etc.
+
+## COOPERATIVE MECHANICS
+
+To successfully push a block of weight W:
+1. W agents must be adjacent to the SAME side of the block
+2. All W agents must issue push/move commands INTO the block simultaneously
+3. If successful, both the block and pushing agents move forward
+4. Block is delivered when any part reaches the goal column
+
+Example for weight-2 block:
+```
+  Agent A     Block      Goal
+     ↓       ┌───┐        │
+  agent_0 -> │   │        │
+  agent_1 -> │   │   ->   │ (delivered!)
+             └───┘        │
+```
+Both agents must be on left side and both must push right.
+
+## ACTIONS
+
+### move(direction, num_steps)
+Move in a direction for num_steps.
+- direction: "up", "down", "left", "right"
+- num_steps: 1-10
+
+### push(block_id, num_steps)
+Push a block by moving into it.
+- block_id: ID of the target block
+- num_steps: How many steps to push
+- Direction is automatic based on agent position relative to block
+- Agent must be adjacent to the block
+
+### wait(num_steps)
+Do nothing for num_steps.
+- Useful for synchronizing with other agents
+- num_steps: 1-10
+
+## OBSERVATION CHANNELS
+
+5-channel observation (K × K × 5):
+- Channel 0: Agent mask (1.0 at agent positions)
+- Channel 1: Block weights (value = weight at block cells)
+- Channel 2: Goal strip (1.0 in rightmost column)
+- Channel 3: Agent IDs (+1)
+- Channel 4: Block IDs (+1)
+
+## REWARDS
+
+- Step cost: Small negative reward per step
+- Delivery reward: Positive reward when block reaches goal
+- Episode ends when all blocks delivered or max steps reached
+
+## STRATEGY TIPS
+
+1. **Communication**: Announce which block you're targeting and from which side
+2. **Coordination**: For weight-2+ blocks, agree on timing (e.g., "push at step 10")
+3. **Positioning**: Get into position on the same side before pushing
+4. **Use wait**: Synchronize pushes with wait actions
+5. **Efficiency**: Push lighter blocks first if they're blocking heavier ones
+
+## SYMBOLIC VIEW FORMAT
+
+```
+      0     1     2     3     4     5     6     7   
+    ------------------------------------------------
+ 0 |  .     .     .     .     .     .     .     G   
+ 1 | A0     .     .     .     .     .     .     G   
+ 2 |  .     .     .     ?     ?     .     .     G   
+ 3 | A1     .     .     ?     ?     .     .     G   
+ 4 |  .     .     .     .     .     .     .     G   
+ ...
+```
+
+Legend:
+- `.` = empty cell
+- `G` = goal column
+- `An` = agent n
+- `?` = block cell (weight shown in block info)
