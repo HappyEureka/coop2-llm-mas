@@ -16,8 +16,9 @@ Decision Flow:
 Interrupt (message arrives while waiting or executing):
     Leader: re-runs its flow, i.e. always replans (nothing interrupts a leader
         except a COOP2 repair request).
-    Follower: replies to the leader, then the LLM decides whether to RESUME
-        the committed plan or REPLAN (BaseLLMAgent.decide_interrupt).
+    Follower: the LLM decides whether to RESUME the committed plan or REPLAN
+        (BaseLLMAgent.decide_interrupt), then the follower replies to the
+        leader and reports that decision.
 
 The shared protocol lives in centralized_flow.py; this module adds the LLM
 role prompts, message text, and planning hooks.
@@ -26,7 +27,7 @@ role prompts, message text, and planning hooks.
 import json
 from typing import List, Dict, Optional
 
-from cognitive.agent import LLMClient
+from cognitive.agent import LLMClient, InterruptDecision
 from cognitive.agent.base_llm_agent import BaseLLMAgent
 from cognitive.agent.cognitive_agent import extract_position, extract_status
 from cognitive.plan import SymbolicPlan
@@ -156,14 +157,25 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
             f"status={self.plan.status.value}; remaining={action_text}."
         )
 
-    def _generate_message(self, request: str) -> str:
-        """Generate a concise status/proposal response for the leader."""
+    def _generate_message(self, request: str, decision: Optional[InterruptDecision] = None) -> str:
+        """Generate a concise status/proposal response for the leader, reporting an interrupt decision if one was made."""
         status = extract_status(self.observation)
         position = extract_position(self.observation)
+        if decision is None:
+            intention_line = (
+                "Include current position/status, current plan, one useful target or prerequisite, "
+                "and whether you intend to resume or revise."
+            )
+        else:
+            decided = "revised your plan" if decision == InterruptDecision.REPLAN else "resumed your current plan"
+            intention_line = (
+                "Include current position/status, your current plan, one useful target or prerequisite, "
+                f"and state that you {decided} in response to the leader's message."
+            )
         user_prompt = "\n".join([
             "The leader is collecting follower status before committing a centralized plan.",
             "Reply with 2-4 concise sentences, not JSON.",
-            "Include current position/status, current plan, one useful target or prerequisite, and whether you intend to resume or revise.",
+            intention_line,
             "",
             "Leader request:",
             request or "Report local status and a feasible next task.",
@@ -200,8 +212,8 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
             ),
         )
 
-    def _build_follower_response(self):
-        return self._generate_message(self.last_leader_request or ""), {'type': 'follower_response'}
+    def _build_follower_response(self, decision: Optional[InterruptDecision] = None):
+        return self._generate_message(self.last_leader_request or "", decision), {'type': 'follower_response'}
 
     def _handle_leader_messages(self, messages: List[Dict]) -> None:
         for msg in messages:
@@ -211,20 +223,16 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
     def _generate_follower_plan_after_response(self) -> SymbolicPlan:
         return self.generate_plan()
 
-    def _respond_to_leader_request(self, messages: List[Dict]) -> bool:
-        leader_messages = [msg for msg in messages if msg.get('sender') == self.leader_id]
-        self._handle_leader_messages(leader_messages)
-        if not leader_messages:
-            return False
+    def _send_follower_response(self, decision: Optional[InterruptDecision] = None) -> None:
+        """Reply to the leader while it is still waiting for follower responses."""
         if self.send_to and self.message_broker is not None and self._leader_is_not_ready():
-            content, metadata = self._build_follower_response()
+            content, metadata = self._build_follower_response(decision)
             self.send_message(
                 recipients=self.send_to,
                 content=content,
                 metadata=metadata,
             )
             self._on_follower_response_sent(content)
-        return True
 
     def _on_follower_response_sent(self, content) -> None:
         if self.verbose:
@@ -236,17 +244,21 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
 
     def handle_interrupt(self):
         """
-        Interrupted during W/X by a leader message: reply to the leader's
-        request, then let the LLM decide whether to resume the committed plan
-        or revise it. COOP2 repair requests always trigger replanning.
+        Interrupted during W/X by a leader message: the LLM decides whether to
+        resume the committed plan or revise it, then the follower replies to
+        the leader and reports that decision. COOP2 repair requests always
+        trigger replanning.
         """
         if self._handle_coop2_repair_interrupt():
             return
         messages = self.get_messages(clear_buffer=True)
         if not messages:
             return
-        self._respond_to_leader_request(messages)
-        self.decide_interrupt(messages)
+        leader_messages = [msg for msg in messages if msg.get('sender') == self.leader_id]
+        self._handle_leader_messages(leader_messages)
+        decision = self.decide_interrupt(messages)
+        if leader_messages:
+            self._send_follower_response(decision)
 
 
 def create_llm_centralized_topology(

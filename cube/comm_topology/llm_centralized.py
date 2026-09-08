@@ -16,14 +16,15 @@ Decision Flow:
 Interrupt (message arrives while waiting or executing):
     Leader: re-runs its flow, i.e. always replans (nothing interrupts a leader
         except a COOP2 repair request).
-    Follower: acknowledges the leader, then the LLM decides whether to RESUME
-        the committed plan or REPLAN (BaseLLMAgent.decide_interrupt).
+    Follower: the LLM decides whether to RESUME the committed plan or REPLAN
+        (BaseLLMAgent.decide_interrupt), then the follower acknowledges the
+        leader and reports that decision.
 """
 
 import time
 from typing import Dict, List, Optional
 
-from cognitive.agent import LLMClient
+from cognitive.agent import LLMClient, InterruptDecision
 from cognitive.agent.base_llm_agent import BaseLLMAgent
 from cognitive.plan import SymbolicPlan
 
@@ -58,6 +59,8 @@ class LLMLeaderAgent(BaseLLMAgent):
         self.send_to = follower_ids
         self.wait_for_response = follower_ids
         self.expected_responses = set()
+        # Followers decide resume-or-replan before acknowledging, so allow one LLM call per follower.
+        self.response_timeout_seconds = 30.0
 
     def _plan_agent_names(self) -> List[str]:
         return [self.agent_id] + list(self.send_to)
@@ -85,7 +88,7 @@ class LLMLeaderAgent(BaseLLMAgent):
                 print(f"  [{self.agent_id}] Sent: {content[:60]}...")
             self.expected_responses = set(self.wait_for_response)
 
-        max_wait = 10.0
+        max_wait = self.response_timeout_seconds
         start = time.time()
         while self.expected_responses and (time.time() - start) < max_wait:
             for msg in self.get_messages(clear_buffer=True):
@@ -139,11 +142,21 @@ class LLMFollowerAgent(BaseLLMAgent):
         """True while the leader is still reasoning (and so waiting for acks)."""
         return self.leader_agent is not None and not self.leader_agent.ready
 
-    def _generate_message(self, directive: str) -> str:
-        """Generate the acknowledgment to the leader via LLM."""
+    def _decision_report(self, decision: InterruptDecision) -> str:
+        """Describe the interrupt decision for the acknowledgment prompt."""
+        plan = self.plan.specification if self.plan else "none"
+        if decision == InterruptDecision.REPLAN:
+            return f"You replanned in response to this directive. Your new plan: {plan}"
+        return f"You decided to resume your current plan: {plan}"
+
+    def _generate_message(self, directive: str, decision: Optional[InterruptDecision] = None) -> str:
+        """Generate the acknowledgment to the leader via LLM, reporting an interrupt decision if one was made."""
+        context = f"Leader's directive: {directive}"
+        if decision is not None:
+            context += "\n" + self._decision_report(decision)
         messages = [
             {"role": "system", "content": f"You are {self.agent_id}, a FOLLOWER. Generate a brief acknowledgment (1-2 sentences)."},
-            {"role": "user", "content": f"Leader's directive: {directive}"}
+            {"role": "user", "content": context}
         ]
         return self._generate_text_from_messages(messages, fallback=f"Acknowledged from {self.agent_id}")
 
@@ -156,10 +169,10 @@ class LLMFollowerAgent(BaseLLMAgent):
                 received = True
         return received
 
-    def _acknowledge_leader(self):
+    def _acknowledge_leader(self, decision: Optional[InterruptDecision] = None):
         """Send an acknowledgment while the leader is waiting for follower responses."""
         if self.send_to and self.message_broker is not None and self._leader_is_not_ready():
-            content = self._generate_message(self.last_leader_directive or "")
+            content = self._generate_message(self.last_leader_directive or "", decision)
             self.send_message(recipients=self.send_to, content=content, metadata={'type': 'follower_response'})
             if self.verbose:
                 print(f"  [{self.agent_id}] Sent ack: {content[:60]}...")
@@ -187,18 +200,21 @@ class LLMFollowerAgent(BaseLLMAgent):
 
     def handle_interrupt(self):
         """
-        Interrupted during W/X by a leader message: acknowledge the leader,
-        then let the LLM decide whether to resume the committed plan or replan.
-        COOP2 repair requests always trigger replanning.
+        Interrupted during W/X by a leader message: the LLM decides whether to
+        resume the committed plan or replan, then the follower acknowledges the
+        leader and reports that decision. COOP2 repair requests always trigger
+        replanning.
         """
         messages = self.get_messages(clear_buffer=True)
         if not messages:
             return
-        if self._store_leader_directive(messages):
-            self._acknowledge_leader()
+        from_leader = self._store_leader_directive(messages)
         if self._handle_coop2_repair_interrupt(messages=messages):
-            return
-        self.decide_interrupt(messages)
+            decision = InterruptDecision.REPLAN
+        else:
+            decision = self.decide_interrupt(messages)
+        if from_leader:
+            self._acknowledge_leader(decision)
 
 
 def create_llm_centralized_topology(

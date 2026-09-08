@@ -100,7 +100,7 @@ A message that arrives while an agent is waiting (`W`) or executing (`X`) moves 
 | --- | --- |
 | Individual | Resumes. Individual agents exchange no messages, so only a COOP²-Repair request can interrupt them, and that triggers replanning. |
 | Centralized leader | Re-runs its planning round: request, wait for follower responses, plan. Nothing interrupts a leader except a COOP²-Repair request. |
-| Centralized follower | Replies to the leader, then asks the LLM whether to resume its committed plan or replan. |
+| Centralized follower | Asks the LLM whether to resume its committed plan or replan, then replies to the leader and reports that decision. |
 | Broadcast Chain speaker | Asks the LLM whether to resume its committed plan or replan. Only a revised plan is broadcast to the later speakers. |
 
 The resume-or-replan decision is `BaseLLMAgent.decide_interrupt` in `*/cognitive/agent/base_llm_agent.py`. It uses the structured `LLMInterruptResponse` schema (Listing 1 in the paper). COOP²-Repair requests always trigger replanning.
