@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -105,7 +105,13 @@ def _save_llm_usage(output_dir: Path, topology: str, agents: Dict[str, object], 
         json.dump(data, handle, indent=2)
 
 
-def run_condition(args) -> Path:
+def run_condition(args, llm_client: Optional[LLMClient] = None) -> Path:
+    """
+    Run one condition and return its results directory.
+
+    ``llm_client`` can be injected (tests use a scripted client); by default it
+    is built from the .env credentials via ``LLMClient.from_env``.
+    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     repair_label = "repair_on" if args.coop2_repair else "repair_off"
     output_root = args.output_root or Path(__file__).resolve().parent / "results"
@@ -118,7 +124,8 @@ def run_condition(args) -> Path:
     print(f"Results: {output_dir}")
     print("=" * 80)
 
-    llm_client = LLMClient.from_env(backend=args.backend, model=args.model, verbose=not args.llm_quiet)
+    if llm_client is None:
+        llm_client = LLMClient.from_env(backend=args.backend, model=args.model, verbose=not args.llm_quiet)
     print(f"LLM: backend={llm_client.backend}, model={llm_client.model}")
 
     block_specs = paper_block_specs()
@@ -204,7 +211,8 @@ def run_condition(args) -> Path:
     return output_dir
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Command-line interface; also used by the grid script's manifest check and by tests."""
     parser = argparse.ArgumentParser(description="Run one CUBE COOP2 condition.")
     parser.add_argument("--topology", choices=sorted(TOPOLOGY_BUILDERS), required=True)
     parser.add_argument("--agents", type=int, default=3)
@@ -222,8 +230,11 @@ def main() -> int:
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--record-video", action="store_true")
     parser.add_argument("--output-root", type=Path, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def main() -> int:
+    args = build_parser().parse_args()
     output_dir = run_condition(args)
     print(output_dir)
     return 0

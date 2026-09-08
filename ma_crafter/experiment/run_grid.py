@@ -23,11 +23,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EXPERIMENT_DIR = ROOT / "experiment"
 
 
-TOPOLOGY_SCRIPTS = {
-    "individual": EXPERIMENT_DIR / "run_individual.py",
-    "centralized": EXPERIMENT_DIR / "run_centralized.py",
-    "broadcast_chain": EXPERIMENT_DIR / "run_broadcast_chain.py",
-}
+CONDITION_SCRIPT = EXPERIMENT_DIR / "run_condition.py"
+TOPOLOGIES = ("individual", "centralized", "broadcast_chain")
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -37,7 +34,9 @@ def parse_int_list(value: str) -> list[int]:
 def build_command(args, topology: str, agent_count: int, repair_enabled: bool, seed: int) -> list[str]:
     command = [
         sys.executable,
-        str(TOPOLOGY_SCRIPTS[topology]),
+        str(CONDITION_SCRIPT),
+        "--topology",
+        topology,
         "--agents",
         str(agent_count),
         "--steps",
@@ -53,12 +52,16 @@ def build_command(args, topology: str, agent_count: int, repair_enabled: bool, s
         command.extend(["--output-root", str(args.output_root)])
     if args.quiet:
         command.append("--quiet")
+    else:
+        command.append("--verbose")
     if args.llm_quiet:
         command.append("--llm-quiet")
+    else:
+        command.append("--llm-verbose")
     if args.show:
         command.append("--show")
-    if not args.record_video:
-        command.append("--no-video")
+    if args.record_video:
+        command.append("--record-video")
     if repair_enabled:
         command.append("--coop2-repair")
     return command
@@ -254,7 +257,7 @@ def main() -> int:
         "--topologies",
         nargs="+",
         default=["individual", "centralized", "broadcast_chain"],
-        choices=sorted(TOPOLOGY_SCRIPTS),
+        choices=sorted(TOPOLOGIES),
         help="Communication structures evaluated in the paper.",
     )
     parser.add_argument("--agent-counts", type=parse_int_list, default=parse_int_list("3,6"))

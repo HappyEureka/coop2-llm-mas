@@ -129,8 +129,8 @@ class CentralizedFollowerInterruptTests(unittest.TestCase):
         self.assertEqual(follower.state, AgentState.W)
         replies = [m for m in leader.message_buffer if m["metadata"].get("type") == "follower_response"]
         self.assertEqual([m["sender"] for m in replies], ["agent_1"])
-        self.assertIn("LLMInterruptResponse", client.calls)
-        self.assertNotIn("LLMPlanResponse", client.calls)
+        self.assertEqual(client.calls, ["LLMInterruptResponse", "text"])  # decide first, then reply
+        self.assertIn("resumed your current plan", client.last_prompt[1]["content"])
 
     def test_replan_installs_inline_plan(self):
         client, _leader, follower = self._interrupt_follower(InterruptDecision.REPLAN)
@@ -140,7 +140,9 @@ class CentralizedFollowerInterruptTests(unittest.TestCase):
         self.assertEqual(follower.plan.specification, str(REVISED_TASK))
         self.assertEqual(follower.plan_count, 2)
         self.assertEqual(follower.state, AgentState.W)
-        self.assertNotIn("LLMPlanResponse", client.calls)
+        self.assertEqual(client.calls, ["LLMInterruptResponse", "text"])
+        self.assertIn("revised your plan", client.last_prompt[1]["content"])
+        self.assertIn(str(REVISED_TASK), client.last_prompt[1]["content"])
 
     def test_replan_without_inline_plan_uses_follower_planner(self):
         client, _leader, follower = self._interrupt_follower(InterruptDecision.REPLAN, inline_plan=False)

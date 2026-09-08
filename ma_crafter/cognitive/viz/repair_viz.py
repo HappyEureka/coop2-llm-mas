@@ -16,7 +16,7 @@ def visualize_repair_interventions(
     output_path: str | Path | None = None,
 ) -> Optional[Path]:
     """Save the current COOP2 repair process figure for one run."""
-    from experiment.plot_coop2_process_case_study import plot_case_study
+    from experiment.plot_process_case_study import plot_case_study
 
     run_path = Path(run_dir)
     if not (run_path / "coop2_process_log.json").exists():
