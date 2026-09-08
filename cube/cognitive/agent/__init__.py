@@ -2,14 +2,14 @@
 Agent module for CUBE.
 
 This module contains:
-- Base Agent class and SimpleAgent implementation
+- Base Agent class (MAEIL state machine, memory, messaging)
 - LLM client and response models
 - Cognitive utilities for prompt building and response parsing
 - Agent memory system
 - Prompt construction utilities
 """
 
-from .agent import Agent, SimpleAgent, AgentState
+from .agent import Agent, AgentState
 from .memory import AgentMemory
 from .base_llm_agent import BaseLLMAgent
 from .llm_client import (
@@ -54,7 +54,6 @@ from .cognitive_agent import (
 __all__ = [
     # Base agent
     'Agent',
-    'SimpleAgent',
     'AgentState',
     'AgentMemory',
     'BaseLLMAgent',

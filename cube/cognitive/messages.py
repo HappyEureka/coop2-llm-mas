@@ -1,5 +1,5 @@
 """
-Message broker for inter-agent communication in MA-Crafter.
+Message broker for inter-agent communication in CUBE.
 
 Routes messages between agents by adding to their message buffers.
 """

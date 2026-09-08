@@ -1,5 +1,5 @@
 """
-Planning environment wrapper for MA-Crafter.
+Planning environment wrapper for CUBE.
 
 This wrapper sits on top of SymbolicEnvWrapper and manages plan execution:
 - Steps through agent plans one primitive action at a time
@@ -56,7 +56,7 @@ class PlanningEnvWrapper:
         Initialize the planning wrapper.
         
         Args:
-            base_env: The base MA-Crafter environment class or instance
+            base_env: The base CUBE environment (CoopBlockPush) class or instance
             agent_names: List of agent names
             agents: Optional dict mapping agent_id to Agent instances
             logger: Optional shared logger for plan tracking

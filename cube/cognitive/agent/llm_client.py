@@ -1,5 +1,5 @@
 """
-LLM Client and Response Models for MA-Crafter.
+LLM Client and Response Models for CUBE.
 
 This module provides:
 - Pydantic models for structured LLM responses (plans, messages, interrupts)
@@ -50,10 +50,6 @@ class Task(str, Enum):
     PUSH_BLOCK = "push_block"  # Push a specific block toward the goal
     COORDINATE = "coordinate"  # Coordinate with other agents on block position
     WAIT = "wait"  # Wait for other agents to get into position
-    
-    # Navigation
-    # NAVIGATE = "navigate"  # Move to a specific position
-    # EXPLORE = "explore"  # Explore the environment
 
 
 class TaskSpecification(BaseModel):

@@ -92,6 +92,26 @@ The Broadcast Chain implementation is named `llm_broadcast_chain.py` throughout 
 | Centralized | `centralized` |
 | Broadcast Chain | `broadcast_chain` |
 
+## Interrupt handling
+
+A message that arrives while an agent is waiting (`W`) or executing (`X`) moves it to the interrupted stage (`I`). The agent then re-enters the cognitive layer before the next primitive step:
+
+| Role | On interrupt |
+| --- | --- |
+| Individual | Resumes. Individual agents exchange no messages, so only a COOP²-Repair request can interrupt them, and that triggers replanning. |
+| Centralized leader | Re-runs its planning round: request, wait for follower responses, plan. Nothing interrupts a leader except a COOP²-Repair request. |
+| Centralized follower | Replies to the leader, then asks the LLM whether to resume its committed plan or replan. |
+| Broadcast Chain speaker | Asks the LLM whether to resume its committed plan or replan. Only a revised plan is broadcast to the later speakers. |
+
+The resume-or-replan decision is `BaseLLMAgent.decide_interrupt` in `*/cognitive/agent/base_llm_agent.py`. It uses the structured `LLMInterruptResponse` schema (Listing 1 in the paper). COOP²-Repair requests always trigger replanning.
+
+Both environments ship unit tests for this stage that use a scripted LLM client, so they need no API credentials:
+
+```bash
+cd cube && python -m unittest tests.test_interrupt_decision
+cd ma_crafter && python -m unittest tests.test_interrupt_decision
+```
+
 ## Outputs and analysis
 
 Each run records files such as:
@@ -131,7 +151,7 @@ The links below use CUBE as the compact reference implementation; MA-Crafter mir
 | [`cognitive/action`](cube/cognitive/action/) | Defines symbolic actions and their controllers. `SymbolicEnvWrapper` translates each agent's current symbolic action into a primitive environment action, advances the base environment, and returns grounded outcomes. |
 | [`cognitive/agent`](cube/cognitive/agent/) | Implements the agent state machine, memory, prompts, LLM calls, plan generation, interruption handling, and replanning. Environment-specific observations and tool descriptions enter agent prompts here. |
 | [`cognitive/plan`](cube/cognitive/plan/) | Defines `SymbolicPlan`, plan executors, plan logging, and `PlanningEnvWrapper`. The wrapper owns the agents and message broker, executes their plans through `SymbolicEnvWrapper`, and aligns cognitive events with primitive steps. |
-| [`comm_topology`](cube/comm_topology/) | Defines who communicates with whom and in what order. The included factories construct Individual, Centralized, and Broadcast Chain agents. |
+| [`comm_topology`](cube/comm_topology/) | Defines who communicates with whom and in what order. The included factories construct Individual, Centralized, and Broadcast Chain agents. A topology class sets `role_prompt`, overrides the `_plan_*` hooks of `BaseLLMAgent` for its team and context, and adds its communication flow in `handle_reasoning` and `handle_interrupt`. |
 | [`cognitive/viz`](cube/cognitive/viz/) | Optionally wraps `PlanningEnvWrapper` to display agent states, plans, actions, and messages or record an episode. It is not required to run an environment. |
 
 `SymbolicEnvWrapper` is the **action-grounding wrapper**: it converts high-level operations such as `navigate`, `collect`, or `push` into the primitive action accepted by the environment at each step. `PlanningEnvWrapper` is the **cognitive-to-primitive orchestration wrapper**: it manages plans and agents above that action layer. Together, `cognitive/` and the grounded environment and task implementation form COOP².

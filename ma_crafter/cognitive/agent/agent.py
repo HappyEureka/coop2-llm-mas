@@ -2,7 +2,8 @@
 Base agent class for planning agents in MA-Crafter.
 
 Defines the interface for agents that generate and execute plans.
-This will be used as the foundation for MAEIL and other planning approaches.
+Implements the MAEIL interaction stages: R (reasoning), W (waiting),
+X (executing), and I (interrupted).
 """
 
 from abc import ABC, abstractmethod
@@ -519,7 +520,6 @@ class Agent(ABC):
         1. Execute any communication flow (wait_for, send_to)
         2. Generate a new plan via generate_plan()
         
-        For simple agents: just call generate_plan()
         For topology agents: execute flow (wait → send → generate_plan)
         
         After this method, create_agent_thread calls set_ready().
@@ -535,86 +535,3 @@ class Agent(ABC):
                   relative_time is seconds since agent initialization.
         """
         return [(t - self._start_time, step, state) for t, step, state in self.state_history]
-
-
-class SimpleAgent(Agent):
-    """
-    Simple agent implementation for testing and demonstration.
-    
-    This agent generates fixed plans based on hardcoded logic.
-    It serves as a reference implementation and can be used for testing.
-    """
-    
-    def __init__(self, agent_id: str, plan_spec: Optional[dict] = None):
-        """
-        Initialize simple agent.
-        
-        Args:
-            agent_id: Unique identifier for this agent
-            plan_spec: Optional plan specification dict with 'actions' and 'description'
-        """
-        super().__init__(agent_id)
-        self.plan_spec = plan_spec or self._get_default_plan_spec()
-    
-    def _get_default_plan_spec(self) -> dict:
-        """Get default plan specification for this agent."""
-        from ..plan.plan import SymbolicAction
-        
-        # Default: move around and collect wood
-        return {
-            'description': 'Explore and collect wood',
-            'actions': [
-                SymbolicAction("move", {"direction": "left", "num_steps": 2}),
-                SymbolicAction("collect", {"target": "wood"}),
-                SymbolicAction("move", {"direction": "right", "num_steps": 3}),
-                SymbolicAction("collect", {"target": "wood"}),
-            ]
-        }
-    
-    def observe(self, observation: Any, env_step: int):
-        """
-        Process observation.
-        
-        For the simple agent, just store the observation and step.
-        """
-        self.observation = observation
-        self.env_step = env_step
-    
-    def generate_plan(self) -> SymbolicPlan:
-        """
-        Generate a plan based on the plan specification.
-        
-        Returns:
-            SymbolicPlan: A new plan with actions from the plan spec
-        """
-        import copy
-        # Deep copy actions to avoid mutating the original plan_spec
-        # Each SymbolicAction tracks start_step/end_step during execution
-        actions = copy.deepcopy(self.plan_spec['actions'])
-        # Note: plan_count is incremented in set_ready(), not here
-        self.plan = SymbolicPlan(
-            specification=self.plan_spec['description'],
-            actions=actions,
-            plan_id=self.plan_count + 1,  # Preview next plan ID (will be finalized in set_ready)
-            agent_id=self.agent_id,
-            created_at_step=self.env_step
-        )
-        return self.plan
-    
-    def reset(self):
-        """Reset agent state."""
-        super().reset()
-    
-    def handle_interrupt(self):
-        """
-        Handle interrupt - SimpleAgent always resumes current plan.
-        """
-        messages = self.get_messages(clear_buffer=True)
-        if self.has_coop2_repair_request(messages):
-            self.generate_plan()
-    
-    def handle_reasoning(self):
-        """
-        Handle reasoning - SimpleAgent just generates a plan (no communication).
-        """
-        self.generate_plan()

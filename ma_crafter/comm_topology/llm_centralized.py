@@ -1,8 +1,5 @@
 """
-LLM-powered Centralized Topology.
-
-Same structure as centralized.py but extends BaseLLMAgent directly.
-Role information is injected into prompts.
+LLM-powered Centralized topology: one leader, n-1 followers.
 
 Decision Flow:
     Leader:
@@ -10,11 +7,20 @@ Decision Flow:
         2. send_to: [all followers] with planning request
         3. wait_for_response: [all followers]
         4. generate plan (LLM)
-    
+
     Follower:
         1. wait_for: [leader]
         2. send_to: [leader] (status/proposal response)
         3. generate plan (LLM)
+
+Interrupt (message arrives while waiting or executing):
+    Leader: re-runs its flow, i.e. always replans (nothing interrupts a leader
+        except a COOP2 repair request).
+    Follower: replies to the leader, then the LLM decides whether to RESUME
+        the committed plan or REPLAN (BaseLLMAgent.decide_interrupt).
+
+The shared protocol lives in centralized_flow.py; this module adds the LLM
+role prompts, message text, and planning hooks.
 """
 
 import json
@@ -23,12 +29,10 @@ from typing import List, Dict, Optional
 from cognitive.agent import LLMClient
 from cognitive.agent.base_llm_agent import BaseLLMAgent
 from cognitive.agent.cognitive_agent import extract_position, extract_status
-from cognitive.agent.prompts import build_system_prompt
-from cognitive.plan import SymbolicPlan, SymbolicPlanStatus
+from cognitive.plan import SymbolicPlan
 from .centralized_flow import CentralizedFollowerFlow, CentralizedLeaderFlow
 
 
-# Role descriptions injected into prompts
 LEADER_ROLE = """
 ## Your Role: LEADER
 Ask followers for local status/proposals, wait for their responses, then commit
@@ -43,37 +47,27 @@ execute a local plan that supports the team objective from your observation.
 
 
 class LLMLeaderAgent(CentralizedLeaderFlow, BaseLLMAgent):
-    """
-    LLM-powered Leader agent for centralized topology.
-    
-    Decision Flow:
-        wait_for: []
-        send_to: [all followers]
-        wait_for_response: [all followers]
-        then: generate plan via LLM
-    """
-    
+    """Leader: requests follower status, waits for responses, then plans."""
+
+    role_prompt = LEADER_ROLE
+    role_name = "LEADER"
+
     def __init__(self, agent_id: str, llm_client: LLMClient, follower_ids: List[str],
                  temperature: float = 0.7, verbose: bool = True):
         super().__init__(agent_id, llm_client, temperature=temperature, verbose=verbose)
-        
-        # Decision Flow Configuration (same as centralized.py)
         self.wait_for = []
         self.send_to = follower_ids
         self.wait_for_response = follower_ids
-        
         self.expected_responses = set()
         self.follower_responses: List[str] = []
-        self._system_prompt = None
         self.centralized_response_timeout_seconds = 30.0
-    
-    def _get_system_prompt(self) -> str:
-        """Build system prompt with leader role injected."""
-        if self._system_prompt is None:
-            base = build_system_prompt(self.agent_id, max_actions=6, include_env_description=True)
-            self._system_prompt = base + LEADER_ROLE
-        return self._system_prompt
-    
+
+    def _plan_agent_names(self) -> List[str]:
+        return [self.agent_id] + list(self.send_to)
+
+    def _plan_context_prefix(self) -> str:
+        return self._follower_response_context()
+
     def _format_planning_request(self) -> str:
         """Request follower status before the leader commits a plan."""
         return (
@@ -93,25 +87,9 @@ class LLMLeaderAgent(CentralizedLeaderFlow, BaseLLMAgent):
             'type': 'leader_broadcast',
             'interrupts_execution': True,
         }
-    
-    def _generate_plan_with_role(self, messages: Optional[List[Dict]] = None) -> SymbolicPlan:
-        """Generate plan via LLM with role context."""
-        repair_messages = messages
-        prompt_messages = self._build_plan_prompt_messages(
-            system_prompt=self._get_system_prompt(),
-            agent_names=[self.agent_id] + list(self.send_to),
-            messages=repair_messages,
-            user_prefix=self._follower_response_context(),
-        )
-        return self._generate_plan_from_messages(
-            prompt_messages=prompt_messages,
-            repair_messages=repair_messages,
-            label="Centralized Leader Plan Generation",
-            verbose_prefix="LEADER calling LLM for plan...",
-        )
 
     def _generate_leader_plan_after_responses(self) -> SymbolicPlan:
-        return self._generate_plan_with_role()
+        return self.generate_plan()
 
     def _handle_leader_response_timeout(self, expected_responses: set[str]) -> None:
         print(f"  [{self.agent_id}] Warning: timeout waiting for {expected_responses}")
@@ -127,48 +105,41 @@ class LLMLeaderAgent(CentralizedLeaderFlow, BaseLLMAgent):
     def _on_all_follower_responses_received(self) -> None:
         if self.verbose:
             print(f"  [{self.agent_id}] All follower responses received")
-    
+
     def handle_reasoning(self):
-        """Execute the decision flow."""
+        """Run the leader flow."""
         self._execute_flow()
-    
+
     def handle_interrupt(self):
-        """Leader replans on interrupt."""
-        if self._handle_coop2_repair_interrupt(self._generate_plan_with_role):
+        """The leader replans on interrupt: COOP2 repair directly, otherwise a new round."""
+        if self._handle_coop2_repair_interrupt():
             return
         self._execute_flow()
 
 
 class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
-    """
-    LLM-powered Follower agent for centralized topology.
-    
-    Decision Flow:
-        wait_for: [leader]
-        send_to: [leader] (response)
-        then: generate plan via LLM
-    """
-    
+    """Follower: waits for the leader's request, replies with status, then plans."""
+
+    role_prompt = FOLLOWER_ROLE
+    role_name = "FOLLOWER"
+
     def __init__(self, agent_id: str, llm_client: LLMClient, leader_id: str,
                  temperature: float = 0.7, verbose: bool = True):
         super().__init__(agent_id, llm_client, temperature=temperature, verbose=verbose)
-        
-        # Decision Flow Configuration (same as centralized.py)
         self.wait_for = [leader_id]
         self.send_to = [leader_id]
-        
         self.leader_id = leader_id
         self.leader_agent: Optional['LLMLeaderAgent'] = None
         self.team_agent_ids: List[str] = [leader_id, agent_id]
         self.last_leader_request = None
-        self._system_prompt = None
-    
-    def _get_system_prompt(self) -> str:
-        """Build system prompt with follower role injected."""
-        if self._system_prompt is None:
-            base = build_system_prompt(self.agent_id, max_actions=6, include_env_description=True)
-            self._system_prompt = base + FOLLOWER_ROLE
-        return self._system_prompt
+
+    def _plan_agent_names(self) -> List[str]:
+        return self.team_agent_ids
+
+    def _plan_context_prefix(self) -> str:
+        if not self.last_leader_request:
+            return ""
+        return f"## Leader Planning Request\n{self.last_leader_request}\n\n"
 
     def _current_plan_summary(self) -> str:
         """Summarize the follower's committed plan for centralized status replies."""
@@ -184,7 +155,7 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
             f"Current plan #{self.plan.plan_id}: {self.plan.specification}; "
             f"status={self.plan.status.value}; remaining={action_text}."
         )
-    
+
     def _generate_message(self, request: str) -> str:
         """Generate a concise status/proposal response for the leader."""
         status = extract_status(self.observation)
@@ -231,26 +202,6 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
 
     def _build_follower_response(self):
         return self._generate_message(self.last_leader_request or ""), {'type': 'follower_response'}
-    
-    def _generate_plan_with_role(self, messages: Optional[List[Dict]] = None) -> SymbolicPlan:
-        """Generate plan via LLM with role context and leader's planning request."""
-        repair_messages = messages
-        request_ctx = ""
-        if self.last_leader_request:
-            request_ctx = f"## Leader Planning Request\n{self.last_leader_request}\n\n"
-        
-        prompt_messages = self._build_plan_prompt_messages(
-            system_prompt=self._get_system_prompt(),
-            agent_names=self.team_agent_ids,
-            messages=repair_messages,
-            user_prefix=request_ctx,
-        )
-        return self._generate_plan_from_messages(
-            prompt_messages=prompt_messages,
-            repair_messages=repair_messages,
-            label="Centralized Follower Plan Generation",
-            verbose_prefix="FOLLOWER calling LLM for plan...",
-        )
 
     def _handle_leader_messages(self, messages: List[Dict]) -> None:
         for msg in messages:
@@ -258,15 +209,7 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
                 self.last_leader_request = msg['content']
 
     def _generate_follower_plan_after_response(self) -> SymbolicPlan:
-        return self._generate_plan_with_role()
-
-    def _has_active_plan_to_resume(self) -> bool:
-        if self.plan is None:
-            return False
-        return self.plan.status in {
-            SymbolicPlanStatus.PENDING,
-            SymbolicPlanStatus.EXECUTING,
-        }
+        return self.generate_plan()
 
     def _respond_to_leader_request(self, messages: List[Dict]) -> bool:
         leader_messages = [msg for msg in messages if msg.get('sender') == self.leader_id]
@@ -286,21 +229,24 @@ class LLMFollowerAgent(CentralizedFollowerFlow, BaseLLMAgent):
     def _on_follower_response_sent(self, content) -> None:
         if self.verbose:
             print(f"  [{self.agent_id}] Sent response: {str(content)[:60]}...")
-    
+
     def handle_reasoning(self):
-        """Execute the decision flow."""
+        """Run the follower flow."""
         self._execute_flow()
-    
+
     def handle_interrupt(self):
-        """Reply to leader interrupts, then either resume or revise."""
-        if self._handle_coop2_repair_interrupt(self._generate_plan_with_role):
+        """
+        Interrupted during W/X by a leader message: reply to the leader's
+        request, then let the LLM decide whether to resume the committed plan
+        or revise it. COOP2 repair requests always trigger replanning.
+        """
+        if self._handle_coop2_repair_interrupt():
             return
         messages = self.get_messages(clear_buffer=True)
-        handled_leader_request = self._respond_to_leader_request(messages)
-        if handled_leader_request and self._has_active_plan_to_resume():
+        if not messages:
             return
-        if handled_leader_request or self.needs_new_plan():
-            self.plan = self._generate_plan_with_role()
+        self._respond_to_leader_request(messages)
+        self.decide_interrupt(messages)
 
 
 def create_llm_centralized_topology(
