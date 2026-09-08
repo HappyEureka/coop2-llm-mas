@@ -1,5 +1,5 @@
 """
-Cognitive LLM utilities for MA-Crafter.
+Cognitive LLM utilities for CUBE.
 
 This module provides utilities for:
 - Converting environment observations to LLM prompts
@@ -12,6 +12,7 @@ from ..plan.plan import SymbolicPlan, SymbolicAction
 from .prompts import (
     build_system_prompt,
     build_observation_prompt,
+    format_memory,
 )
 from .llm_client import (
     LLMPlanResponse,
@@ -148,6 +149,7 @@ def build_interrupt_prompt(
     memory: Optional[List[Dict]] = None,
     coop_config: Optional[str] = None,
     symbolic_view: Optional[str] = None,
+    extra_context: Optional[str] = None,
 ) -> List[Dict]:
     """
     Build LLM prompt messages for interrupt handling.
@@ -163,6 +165,7 @@ def build_interrupt_prompt(
         memory: List of memory events from AgentMemory.get_events()
         coop_config: Formatted cooperative configuration string from env.get_config_observation()
         symbolic_view: Symbolic view text from coop_env info['symbolic_view']
+        extra_context: Optional extra prompt section shown after the memory (e.g. earlier proposals)
         
     Returns:
         List of message dicts for LLM API call
@@ -205,15 +208,20 @@ def build_interrupt_prompt(
     lines.append("")
     
     # Memory (recent events)
-    if memory:
+    memory_text = format_memory(memory, max_events=5) if memory else ""
+    if memory_text:
         lines.append("## Recent Memory")
-        for event in memory[-5:]:  # Last 5 events
-            if event['type'] == 'message':
-                lines.append(f"  - [Step {event.get('env_step', '?')}] Message from {event['sender']}: {event['content']}")
-            elif event['type'] == 'plan':
-                lines.append(f"  - [Step {event.get('env_step', '?')}] Started plan #{event['plan_id']}: {event['specification']}")
+        memory_lines = memory_text.splitlines()
+        if memory_lines and memory_lines[0].strip() == "RECENT MEMORY:":
+            memory_lines = memory_lines[1:]
+        lines.extend(memory_lines)
         lines.append("")
     
+    # Extra topology context (e.g. earlier Broadcast Chain proposals)
+    if extra_context:
+        lines.append(extra_context.rstrip())
+        lines.append("")
+
     # Current plan and status
     lines.append("## Current Plan Status")
     if current_plan:

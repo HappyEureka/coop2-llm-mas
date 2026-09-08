@@ -1,29 +1,28 @@
 """
 LLM-powered Broadcast Chain topology.
 
-The communication pattern is a fixed order in which each agent broadcasts to
-all agents that follow it.
-Each agent broadcasts to ALL following agents.
+Speakers take a fixed order; each broadcasts to all agents that follow it.
 
 Decision Flow:
     Agent 0: send → plan (first speaker)
     Agent 1+: wait → send → plan
-    
+
     Each agent:
         1. wait_for: [previous_agent] (empty for agent 0)
         2. send_to: [all following agents]
         3. generate plan via LLM
+
+Interrupt (an earlier speaker's broadcast arrives while waiting or executing):
+    The LLM decides whether to RESUME the committed plan or REPLAN
+    (BaseLLMAgent.decide_interrupt). Only a revised plan is broadcast to the
+    following speakers.
 """
 
 import time
-from typing import List, Dict
+from typing import Dict, List, Optional
 
-from cognitive.agent import LLMClient
+from cognitive.agent import LLMClient, InterruptDecision
 from cognitive.agent.base_llm_agent import BaseLLMAgent
-from cognitive.agent.prompts import build_system_prompt, build_observation_prompt
-from cognitive.agent.cognitive_agent import (
-    extract_status, extract_position, extract_facing, extract_visible_area, parse_plan_response,
-)
 from cognitive.plan import SymbolicPlan
 
 
@@ -56,118 +55,61 @@ You speak in the middle of the Broadcast Chain. Your responsibilities:
 
 
 class LLMBroadcastChainAgent(BaseLLMAgent):
-    """
-    LLM-powered agent for Broadcast Chain.
-    
-    Decision Flow:
-        wait_for: [previous_agent_id] (empty for first speaker)
-        send_to: [all following_agent_ids]
-        then: generate plan via LLM
-    """
-    
+    """Speaks in a fixed order and broadcasts its proposal to all later speakers."""
+
+    role_name = "BROADCAST CHAIN"
+
     def __init__(self, agent_id: str, llm_client: LLMClient, speaker_order: int,
                  following_agent_ids: List[str], previous_agent_id: str,
                  n_agents: int, temperature: float = 0.7, verbose: bool = True):
         super().__init__(agent_id, llm_client, temperature=temperature, verbose=verbose)
         self.speaker_order = speaker_order
         self.n_agents = n_agents
-        
-        # Decision flow configuration.
+        self.role_prompt = get_broadcast_chain_role(speaker_order, n_agents)
         self.wait_for = [previous_agent_id] if previous_agent_id else []
         self.send_to = following_agent_ids
-        
-        self._last_flow_step = None
         self._all_agents: Dict[str, 'LLMBroadcastChainAgent'] = {}
-        self._system_prompt = None
         self.broadcast_history: List[str] = []
-    
-    def _any_previous_agent_not_ready(self) -> bool:
-        """Check if any agent we're waiting for is not ready."""
-        if not self.wait_for or not self._all_agents:
-            return False
-        return any(
-            self._all_agents.get(aid) and not self._all_agents[aid].ready
-            for aid in self.wait_for
-        )
-    
-    def _get_system_prompt(self) -> str:
-        """Build the system prompt for this position in the chain."""
-        if self._system_prompt is None:
-            base = build_system_prompt(self.agent_id, max_actions=6, include_env_description=True)
-            self._system_prompt = base + get_broadcast_chain_role(self.speaker_order, self.n_agents)
-        return self._system_prompt
-    
+
+    def _plan_agent_names(self) -> List[str]:
+        return [f"agent_{i}" for i in range(self.n_agents)]
+
+    def _plan_context_prefix(self) -> str:
+        if not self.broadcast_history:
+            return ""
+        return "## Earlier Proposals\n" + "\n".join(self.broadcast_history) + "\n\n"
+
+    def _earlier_proposals_context(self) -> Optional[str]:
+        """Earlier proposals as an extra prompt section for interrupt decisions."""
+        if not self.broadcast_history:
+            return None
+        return "## Earlier Proposals\n" + "\n".join(self.broadcast_history)
+
     def _generate_message(self, context: str) -> str:
-        """Generate a Broadcast Chain message via the LLM."""
+        """Generate a Broadcast Chain proposal via LLM."""
         messages = [
             {"role": "system", "content": f"You are {self.agent_id}, speaker {self.speaker_order + 1} in a Broadcast Chain. Generate a brief proposal (2-3 sentences) for all following agents."},
             {"role": "user", "content": context}
         ]
-        try:
-            response, usage = self.llm_client.generate(messages, response_format=None, temperature=self.temperature)
-            self.api_calls += 1
-            self.total_tokens_used += usage['total_tokens']
-            self.prompt_tokens += usage['prompt_tokens']
-            self.completion_tokens += usage['completion_tokens']
-            return response
-        except Exception:
-            return f"Broadcast Chain contribution from {self.agent_id}"
-    
-    def _generate_plan_with_role(self) -> SymbolicPlan:
-        """Generate a plan with the earlier Broadcast Chain messages."""
-        broadcast_context = ""
-        if self.broadcast_history:
-            broadcast_context = "## Earlier Proposals\n" + "\n".join(self.broadcast_history) + "\n\n"
-        
-        obs_prompt = build_observation_prompt(
-            env_step=self.env_step, agent_id=self.agent_id,
-            agent_names=[f"agent_{i}" for i in range(self.n_agents)],
-            status=extract_status(self.observation), position=extract_position(self.observation),
-            facing=extract_facing(self.observation), visible_area=extract_visible_area(self.observation),
-            memory=self.memory.get_events(), coop_config=self.coop_config, symbolic_view=self.symbolic_view,
-        )
-        messages = [
-            {"role": "system", "content": self._get_system_prompt()},
-            {"role": "user", "content": broadcast_context + obs_prompt}
-        ]
-        
-        if self.verbose:
-            print(f"  [{self.agent_id}] BROADCAST CHAIN calling LLM for plan...")
-        
-        try:
-            response, usage = self.llm_client.generate_plan(messages, self.temperature)
-            self.api_calls += 1
-            self.total_tokens_used += usage['total_tokens']
-            self.prompt_tokens += usage['prompt_tokens']
-            self.completion_tokens += usage['completion_tokens']
-            
-            plan = parse_plan_response(response, self.agent_id, self.env_step, self.plan_count + 1)
-            if self.verbose:
-                print(f"  [{self.agent_id}] Plan: {plan.specification}")
-            return plan
-        except Exception as e:
-            print(f"  [{self.agent_id}] LLM error: {e}")
-            return self._generate_fallback_plan()
-    
-    def _execute_flow(self) -> SymbolicPlan:
-        """
-        Execute the Broadcast Chain decision flow:
-        1. Wait for message from previous agent (if not first)
-        2. Broadcast to all following agents
-        3. Generate plan via LLM
-        """
-        # Step 1: Wait for previous agent (only if they're not ready)
-        if self.wait_for and self._any_previous_agent_not_ready():
+        return self._generate_text_from_messages(messages, fallback=f"Broadcast Chain contribution from {self.agent_id}")
+
+    def _wait_for_previous_speaker(self):
+        """Wait for the previous speaker's broadcast while that speaker is still planning."""
+        if self.wait_for and self._any_waiting_agent_not_ready(self._all_agents):
             while not self.wait_for_messages_from(self.wait_for):
-                if not self._any_previous_agent_not_ready():
+                if not self._any_waiting_agent_not_ready(self._all_agents):
                     break
                 time.sleep(0.05)
-        
-        # Step 2: Collect messages from earlier speakers.
-        for msg in self.get_messages(clear_buffer=True):
+
+    def _collect_broadcasts(self) -> List[Dict]:
+        """Move buffered messages from earlier speakers into the broadcast history."""
+        messages = self.get_messages(clear_buffer=True)
+        for msg in messages:
             self.broadcast_history.append(f"[{msg['sender']}]: {msg['content']}")
-        
-        # Step 3: Broadcast to all following agents
+        return messages
+
+    def _broadcast_to_following(self):
+        """Broadcast the current plan proposal to all following speakers."""
         if self.send_to and self.message_broker is not None:
             plan_hint = self.plan.specification if self.plan else "exploring"
             history_summary = f"Earlier proposals: {len(self.broadcast_history)}" if self.broadcast_history else "First proposal"
@@ -175,25 +117,46 @@ class LLMBroadcastChainAgent(BaseLLMAgent):
             self.send_message(recipients=self.send_to, content=content, metadata={'type': 'broadcast_chain', 'speaker_order': self.speaker_order})
             if self.verbose:
                 print(f"  [{self.agent_id}] Broadcast to {self.send_to}: {content[:50]}...")
-        
-        # Step 4: Generate plan via LLM
-        self._last_flow_step = self.env_step
-        self.plan = self._generate_plan_with_role()
-        self.plan_count += 1
-        return self.plan
-    
+
+    def _execute_flow(self) -> SymbolicPlan:
+        """
+        Broadcast Chain decision flow:
+        1. Wait for the previous speaker (if any) while it is still planning
+        2. Collect earlier speakers' broadcasts
+        3. Broadcast to all following speakers
+        4. Generate plan via LLM
+        """
+        self._wait_for_previous_speaker()
+        self._collect_broadcasts()
+        self._broadcast_to_following()
+        return self.generate_plan()
+
     def handle_reasoning(self):
-        """Execute the decision flow."""
+        """Run the Broadcast Chain flow."""
         self._execute_flow()
-    
+
     def handle_interrupt(self):
-        """Replan on interrupt."""
-        self._execute_flow()
-    
+        """
+        Interrupted during W/X by an earlier speaker's broadcast: let the LLM
+        decide whether to resume the committed plan or replan. Only a revised
+        plan is broadcast to the following speakers. COOP2 repair requests
+        always trigger replanning.
+        """
+        self._wait_for_previous_speaker()
+        earlier_proposals = self._earlier_proposals_context()
+        messages = self._collect_broadcasts()
+        if not messages:
+            return
+        if self._handle_coop2_repair_interrupt(messages=messages):
+            self._broadcast_to_following()
+            return
+        decision = self.decide_interrupt(messages, extra_context=earlier_proposals)
+        if decision == InterruptDecision.REPLAN:
+            self._broadcast_to_following()
+
     def reset(self):
         """Reset agent state."""
         super().reset()
-        self._last_flow_step = None
         self.broadcast_history = []
 
 

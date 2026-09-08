@@ -1,5 +1,5 @@
 """
-Memory management for agents in MA-Crafter.
+Memory management for agents in CUBE.
 
 Provides a unified event memory that tracks messages and plans in chronological order.
 """

@@ -1,21 +1,25 @@
 """
-Base LLM Agent implementation.
+Base LLM agent for MA-Crafter.
 
-Provides a reusable Agent that uses LLM for:
-- Plan generation based on observations
-- Interrupt handling decisions
-- Message generation for inter-agent communication
+The reusable LLM-backed agent behind every communication topology:
+- plan generation with the agent's role, team, and topology context
+- the interrupted-stage decision: resume the committed plan or replan
+- plain-text message generation for topology protocols and COOP2 repair rounds
+- LLM usage accounting
+
+A topology class (see comm_topology/) sets ``role_prompt`` and ``role_name``,
+overrides the small ``_plan_*`` hooks for its team and context, and adds its
+communication flow on top of ``handle_reasoning`` / ``handle_interrupt``.
 """
 
 import json
 import threading
-from typing import List, Any, Optional, Dict, Callable
+from typing import Any, Dict, List, Optional
 
 from .agent import Agent
 from .llm_client import LLMClient, InterruptDecision
+from .prompts import build_system_prompt, build_observation_prompt
 from .cognitive_agent import (
-    build_plan_prompt,
-    build_observation_prompt,
     build_interrupt_prompt,
     extract_status,
     extract_position,
@@ -30,43 +34,44 @@ from ..plan.plan import SymbolicPlan, SymbolicAction
 
 class BaseLLMAgent(Agent):
     """
-    Agent that uses real LLM for plan generation and communication.
+    LLM-backed planning agent. Communication is added by topology subclasses.
 
-    Uses OpenAI/Azure OpenAI API for:
-    - Generating plans based on observations
-    - Deciding whether to resume or replan on interrupts
-    - Generating communication messages
+    Defaults: the reasoning stage plans from the current observation, with any
+    buffered messages as context, and sends nothing. An interrupt asks the LLM
+    whether to resume or replan, except for COOP2 repair requests, which
+    always replan.
     """
+
     _llm_print_lock = threading.Lock()
-    
+
+    # Set by topology classes: role text appended to the system prompt and a
+    # short name used in log lines (e.g. "LEADER").
+    role_prompt: str = ""
+    role_name: str = ""
+
     def __init__(
         self,
         agent_id: str,
         llm_client: LLMClient,
-        should_broadcast: bool = True,
         max_memory_size: int = 10,
         temperature: float = 0.7,
         verbose: bool = True,
     ):
         """
-        Initialize LLM agent.
-        
         Args:
             agent_id: Agent identifier
             llm_client: LLM client for API calls
-            should_broadcast: Whether to send messages after plan generation
             max_memory_size: Number of recent events to keep in memory
             temperature: LLM sampling temperature
             verbose: Whether to print LLM inputs and outputs
         """
         super().__init__(agent_id, memory_size=max_memory_size)
         self.llm_client = llm_client
-        self.should_broadcast = should_broadcast
         self.temperature = temperature
         self.verbose = verbose
-        self.other_agents: List[str] = []  # Set externally
-        
-        # Token tracking
+        self._system_prompt: Optional[str] = None
+
+        # LLM usage accounting
         self.total_tokens_used = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -78,28 +83,56 @@ class BaseLLMAgent(Agent):
         self.api_error_retries = 0
         self.llm_errors = 0
         self.guard_filter_events = 0
-        
-        # Environment info (set externally)
+
+        # Environment info, refreshed by the planning wrapper every step
         self.coop_config: Optional[str] = None
         self.symbolic_view: Optional[str] = None
         self.target_hints: Optional[str] = None
-    
+
+    # ------------------------------------------------------------------
+    # Environment interface
+    # ------------------------------------------------------------------
     def observe(self, observation: Any, env_step: int):
-        """Process observation from environment."""
+        """Store the latest observation and environment step."""
         self.observation = observation
         self.env_step = env_step
-    
+
     def set_env_info(
         self,
         coop_config: Optional[str] = None,
         symbolic_view: Optional[str] = None,
         target_hints: Optional[str] = None,
     ):
-        """Set environment info for prompts."""
+        """Set environment info used in prompts."""
         self.coop_config = coop_config
         self.symbolic_view = symbolic_view
         self.target_hints = target_hints
 
+    # ------------------------------------------------------------------
+    # Topology hooks
+    # ------------------------------------------------------------------
+    def _get_system_prompt(self) -> str:
+        """Environment system prompt plus this agent's role description (cached)."""
+        if self._system_prompt is None:
+            base = build_system_prompt(self.agent_id, max_actions=6, include_env_description=True)
+            self._system_prompt = base + self.role_prompt
+        return self._system_prompt
+
+    def _plan_agent_names(self) -> List[str]:
+        """Agent ids listed in the plan prompt. Topologies return their team."""
+        return [self.agent_id]
+
+    def _plan_context_prefix(self) -> str:
+        """Topology context placed before the observation, e.g. the leader's request."""
+        return ""
+
+    def _plan_coop_config(self) -> Optional[str]:
+        """Cooperative configuration text for the plan prompt; topologies may extend it."""
+        return self.coop_config
+
+    # ------------------------------------------------------------------
+    # LLM call helpers
+    # ------------------------------------------------------------------
     def _should_print_llm_io(self) -> bool:
         """Return True when either agent or client verbose mode wants prompt IO."""
         return bool(self.verbose or getattr(self.llm_client, "verbose", False))
@@ -134,27 +167,9 @@ class BaseLLMAgent(Agent):
     def _record_llm_error(self, error: Exception):
         """Record an LLM-call failure for run-level monitoring."""
         self.llm_errors += 1
-        if self._is_guard_filter_error(error):
+        is_guard_filter_error = getattr(self.llm_client, "_is_guard_filter_error", None)
+        if callable(is_guard_filter_error) and is_guard_filter_error(error):
             self.guard_filter_events += 1
-
-    @staticmethod
-    def _is_guard_filter_error(error: Exception) -> bool:
-        parts = [
-            str(error),
-            str(getattr(error, "code", "")),
-            str(getattr(error, "body", "")),
-            str(getattr(error, "message", "")),
-        ]
-        text = " ".join(parts).lower()
-        markers = (
-            "content_filter",
-            "content filter",
-            "responsibleaipolicy",
-            "policy violation",
-            "filtered due to",
-            "safety system",
-        )
-        return any(marker in text for marker in markers)
 
     def _any_waiting_agent_not_ready(
         self,
@@ -175,7 +190,7 @@ class BaseLLMAgent(Agent):
         plan: SymbolicPlan,
         repair_messages: Optional[List[Dict]] = None,
     ) -> SymbolicPlan:
-        """Apply shared post-processing to plans generated by LLM topology agents."""
+        """Apply shared post-processing to generated plans (COOP2 repair recommendations)."""
         return apply_repair_plan_recommendation(
             plan,
             self.agent_id,
@@ -190,7 +205,7 @@ class BaseLLMAgent(Agent):
         user_prefix: str = "",
         coop_config_override: Optional[str] = None,
     ) -> List[Dict[str, str]]:
-        """Build the standard topology plan prompt with optional role-local context."""
+        """Build the plan prompt: system prompt, then topology context and observation."""
         coop_config = self.coop_config if coop_config_override is None else coop_config_override
         obs_prompt = build_observation_prompt(
             env_step=self.env_step,
@@ -266,59 +281,38 @@ class BaseLLMAgent(Agent):
             self._record_llm_error(e)
             return fallback
 
-    def _handle_coop2_repair_interrupt(
-        self,
-        plan_generator: Optional[Callable[..., SymbolicPlan]] = None,
-        messages: Optional[List[Dict]] = None,
-    ) -> bool:
-        """Consume a COOP2 repair interrupt and regenerate a plan with its context."""
-        if messages is None:
-            pending_messages = self.get_messages(clear_buffer=False)
-            if not self.has_coop2_repair_request(pending_messages):
-                return False
-            messages = self.get_messages(clear_buffer=True)
-        elif not self.has_coop2_repair_request(messages):
-            return False
-
-        if self.verbose:
-            print(f"  [{self.agent_id}] COOP2 repair request received: replanning")
-
-        if plan_generator is None:
-            self.generate_plan(messages=messages)
-        else:
-            self.plan = plan_generator(messages=messages)
-        return True
-
+    # ------------------------------------------------------------------
+    # Planning
+    # ------------------------------------------------------------------
     def generate_plan(self, messages: Optional[List[Dict]] = None) -> SymbolicPlan:
         """
-        Generate a plan using LLM based on current observation.
-        
+        Generate a plan with the LLM using this agent's role, team, and topology context.
+
+        Args:
+            messages: Messages to show in the prompt (e.g. a COOP2 repair request)
+
         Returns:
-            SymbolicPlan: Generated plan
+            The new plan, also stored in self.plan
         """
-        repair_messages = messages
-        # Build prompt for LLM
-        prompt_messages = build_plan_prompt(
-            observation=self.observation,
-            env_step=self.env_step,
-            agent_id=self.agent_id,
-            messages=repair_messages,
-            memory=self.memory.get_events(),
-            coop_config=self.coop_config,
-            symbolic_view=self.symbolic_view,
-            target_hints=self.target_hints,
+        prompt_messages = self._build_plan_prompt_messages(
+            system_prompt=self._get_system_prompt(),
+            agent_names=self._plan_agent_names(),
+            messages=messages,
+            user_prefix=self._plan_context_prefix(),
+            coop_config_override=self._plan_coop_config(),
         )
-        
         self.plan = self._generate_plan_from_messages(
             prompt_messages=prompt_messages,
-            repair_messages=repair_messages,
-            label="Plan Generation",
-            verbose_prefix="Calling LLM for plan generation...",
+            repair_messages=messages,
+            label=f"{self.role_name} Plan Generation".strip(),
+            verbose_prefix=(
+                f"{self.role_name} calling LLM for plan..." if self.role_name else "Calling LLM for plan..."
+            ),
         )
         return self.plan
-    
+
     def _generate_fallback_plan(self) -> SymbolicPlan:
-        """Generate a simple fallback plan when LLM fails."""
+        """Simple fallback plan when the LLM call fails."""
         return SymbolicPlan(
             specification="Fallback exploration",
             actions=[
@@ -330,6 +324,9 @@ class BaseLLMAgent(Agent):
             created_at_step=self.env_step
         )
 
+    # ------------------------------------------------------------------
+    # COOP2 repair round
+    # ------------------------------------------------------------------
     def describe_repair_intention(
         self,
         repair_context: Dict[str, Any],
@@ -397,53 +394,66 @@ class BaseLLMAgent(Agent):
             )
 
     def _repair_intention_system_prompt(self) -> str:
-        """Use the topology role prompt when a topology subclass provides one."""
-        role_prompt = None
-        get_system_prompt = getattr(self, "_get_system_prompt", None)
-        if callable(get_system_prompt):
-            try:
-                role_prompt = get_system_prompt()
-            except Exception:
-                role_prompt = None
-
+        """Role prompt plus the COOP2 repair-channel response rules."""
         repair_rules = "\n".join([
             "COOP2 repair-channel response rules:",
             "- Keep the role and communication structure from the prompt above.",
             "- State only your repair intention for the current predicted failure.",
             "- Do not assign yourself or others a new permanent role.",
         ])
-        if role_prompt:
-            return f"{role_prompt}\n\n{repair_rules}"
-        return "You are a cooperative planning agent.\n\n" + repair_rules
-    
-    def handle_interrupt(self):
-        """
-        Handle interrupt by asking LLM to decide whether to resume or replan.
-        
-        Provides LLM with:
-        - Current observation
-        - Memory of recent events
-        - Current plan and its execution status
-        - Messages that triggered the interrupt
-        """
-        messages = self.get_messages(clear_buffer=True)
-        
-        if not messages:
-            return
+        return f"{self._get_system_prompt()}\n\n{repair_rules}"
 
-        if self.has_coop2_repair_request(messages):
-            self._handle_coop2_repair_interrupt(messages=messages)
-            return
+    # ------------------------------------------------------------------
+    # Reasoning and interrupted stages
+    # ------------------------------------------------------------------
+    def _handle_coop2_repair_interrupt(self, messages: Optional[List[Dict]] = None) -> bool:
+        """
+        Replan when the buffered (or given) messages contain a COOP2 repair request.
+
+        With ``messages=None`` the buffer is only consumed if it holds a repair
+        request. Returns True when a repair request was handled.
+        """
+        if messages is None:
+            if not self.has_coop2_repair_request(self.get_messages(clear_buffer=False)):
+                return False
+            messages = self.get_messages(clear_buffer=True)
+        elif not self.has_coop2_repair_request(messages):
+            return False
+
+        if self.verbose:
+            print(f"  [{self.agent_id}] COOP2 repair request received: replanning")
+        self.generate_plan(messages=messages)
+        return True
+
+    def decide_interrupt(
+        self,
+        messages: List[Dict],
+        extra_context: Optional[str] = None,
+    ) -> InterruptDecision:
+        """
+        Ask the LLM whether to resume the committed plan or replan.
+
+        This is the decision made in the interrupted stage (I): the agent
+        processes the messages that interrupted it and chooses RESUME (keep
+        self.plan) or REPLAN (self.plan becomes a new plan). Topology agents
+        call this after their own protocol steps, e.g. replying to the leader.
+
+        Args:
+            messages: Messages that triggered the interrupt (already taken from the buffer)
+            extra_context: Optional extra prompt section (e.g. earlier proposals)
+
+        Returns:
+            The decision that was applied. Any LLM failure falls back to RESUME.
+        """
+        if not messages:
+            return InterruptDecision.RESUME
 
         if self.verbose:
             print(f"\n[{self.agent_id}] Received {len(messages)} message(s):")
             for msg in messages:
                 print(f"  From {msg['sender']}: {msg['content']}")
-        
-        # Always use LLM to decide
-        if self.verbose:
             print(f"  [{self.agent_id}] Asking LLM for interrupt decision...")
-        
+
         try:
             interrupt_messages = build_interrupt_prompt(
                 observation=self.observation,
@@ -451,83 +461,86 @@ class BaseLLMAgent(Agent):
                 agent_id=self.agent_id,
                 current_plan=self.plan,
                 received_messages=messages,
+                system_prompt=self._get_system_prompt(),
                 memory=self.memory.get_events(),
                 coop_config=self.coop_config,
                 symbolic_view=self.symbolic_view,
                 target_hints=self.target_hints,
+                extra_context=extra_context,
             )
-            
+
             if self._should_print_llm_io():
                 self._print_llm_messages("Interrupt Decision", interrupt_messages)
-            
+
             response, usage = self.llm_client.generate_interrupt_decision(
                 messages=interrupt_messages,
-                temperature=self.temperature
+                temperature=self.temperature,
             )
-            
             self._record_llm_usage(usage)
-            
+
             if self.verbose:
                 print(f"    LLM reasoning: {response.reasoning}")
                 print(f"    Tokens used: {usage['total_tokens']}")
-            
+
             decision, new_plan = parse_interrupt_response(
                 llm_response=response,
                 agent_id=self.agent_id,
                 env_step=self.env_step,
-                plan_id=self.plan_count + 1
+                plan_id=self.plan_count + 1,
             )
-            
+
             if decision == InterruptDecision.RESUME:
                 if self.verbose:
                     print(f"  [{self.agent_id}] LLM decided: RESUME current plan")
-            else:
+                return InterruptDecision.RESUME
+
+            if self.verbose:
+                print(f"  [{self.agent_id}] LLM decided: REPLAN")
+            if new_plan is not None:
+                self.plan = self._finalize_generated_plan(new_plan)
                 if self.verbose:
-                    print(f"  [{self.agent_id}] LLM decided: REPLAN")
-                if new_plan:
-                    self.plan = new_plan
-                    if self.verbose:
-                        print(f"    New plan: {self.plan.specification}")
-                        print(f"    Actions: {[str(a) for a in self.plan.actions]}")
-                else:
-                    # LLM said replan but didn't provide plan, generate one
-                    if self.verbose:
-                        print(f"    Generating new plan...")
-                    self.generate_plan()
-                    
+                    print(f"    New plan: {self.plan.specification}")
+                    print(f"    Actions: {[str(a) for a in self.plan.actions]}")
+            else:
+                # LLM said replan but did not include a plan: generate one
+                if self.verbose:
+                    print("    Generating new plan...")
+                self.generate_plan()
+            return InterruptDecision.REPLAN
+
         except Exception as e:
             self._record_llm_error(e)
             print(f"  [{self.agent_id}] LLM interrupt error: {e}")
             print(f"  [{self.agent_id}] Falling back to resume")
             import traceback
             traceback.print_exc()
-    
+            return InterruptDecision.RESUME
+
     def handle_reasoning(self):
         """
-        Handle reasoning state - generate plan and optionally broadcast.
+        Reasoning-stage default: plan from the current observation, showing any
+        buffered messages as context, and send nothing. Topology classes
+        override this to run their communication flow first.
         """
-        # Generate plan using LLM
-        self.generate_plan()
-        
-        # Optionally broadcast to other agents
-        if self.should_broadcast and self.message_broker and self.other_agents:
-            try:
-                content = f"I'm starting plan: {self.plan.specification}"
-                self.send_message(
-                    recipients=self.other_agents,
-                    content=content,
-                    metadata={'plan_id': self.plan.plan_id, 'step': self.env_step}
-                )
-                if self.verbose:
-                    print(f"  [{self.agent_id}] Broadcasted plan to {self.other_agents}")
-            except Exception as e:
-                print(f"  [{self.agent_id}] Broadcast failed: {e}")
-    
+        messages = self.get_messages(clear_buffer=True)
+        self.generate_plan(messages=messages or None)
+
+    def handle_interrupt(self):
+        """
+        Interrupted-stage default: a COOP2 repair request always replans;
+        otherwise the LLM decides whether to resume or replan.
+        """
+        messages = self.get_messages(clear_buffer=True)
+        if not messages:
+            return
+        if self._handle_coop2_repair_interrupt(messages=messages):
+            return
+        self.decide_interrupt(messages)
+
     def reset(self):
-        """Reset agent state."""
+        """Reset agent state. Usage counters are kept across resets for statistics."""
         super().reset()
-        # Keep token counts across resets for statistics
-    
+
     def get_usage_stats(self) -> dict:
         """Get LLM usage statistics."""
         return {

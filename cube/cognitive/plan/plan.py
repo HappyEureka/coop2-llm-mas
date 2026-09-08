@@ -1,5 +1,5 @@
 """
-Plan interface for MA-Crafter agents.
+Plan interface for CUBE agents.
 
 A Plan consists of:
 - Specification: Goal/description of what the plan aims to achieve
@@ -309,7 +309,7 @@ class SymbolicPlanLogger:
 
 class SymbolicPlanExecutor:
     """
-    Executor interface for managing plan execution in MA-Crafter.
+    Executor interface for managing plan execution in CUBE.
     
     The executor manages plan lifecycle, executes action sequences,
     and handles plan completion or failure.

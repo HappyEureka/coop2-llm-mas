@@ -10,7 +10,6 @@ from .plan import PlanningEnvWrapper, SymbolicPlan, SymbolicPlanStatus, Symbolic
 from .constants import ACTION_NAME_TO_VALUE, ACTION_SCHEMA
 from .agent import (
     Agent,
-    SimpleAgent,
     AgentState,
     AgentMemory,
     BaseLLMAgent,
@@ -55,71 +54,6 @@ from .compute_metrics import (
     load_logs,
 )
 
-# Simple wrapper functions for convenient action creation
-def move(direction):
-    """Create a move action. Usage: move('left')"""
-    return {'action_type': 'move', 'args': {'direction': direction}}
-
-def collect(leader_agent, object_type, object_id, collaborating_agents=None):
-    """Create a collect action."""
-    if collaborating_agents is None:
-        collaborating_agents = []
-    return {
-        'action_type': 'collect',
-        'args': {
-            'leader_agent': leader_agent,
-            'object_type': object_type,
-            'object_id': object_id,
-            'collaborating_agents': collaborating_agents
-        }
-    }
-
-def craft(leader_agent, object_type, collaborating_agents=None):
-    """Create a craft action."""
-    if collaborating_agents is None:
-        collaborating_agents = []
-    return {
-        'action_type': 'craft',
-        'args': {
-            'leader_agent': leader_agent,
-            'object_type': object_type,
-            'collaborating_agents': collaborating_agents
-        }
-    }
-
-def place(object_type):
-    """Create a place action."""
-    return {'action_type': 'place', 'args': {'object_type': object_type}}
-
-def sleep():
-    """Create a sleep action."""
-    return {'action_type': 'sleep', 'args': {}}
-
-def share(recipient_agent_id, resource_type, quantity=1):
-    """
-    Create a share action to transfer resources/tools to another agent.
-    
-    Args:
-        recipient_agent_id: ID of the agent to share with (e.g., 'agent_1' or '1')
-        resource_type: Type of resource/tool to share (anything except 'health')
-        quantity: Amount to share (default 1)
-    
-    Returns:
-        Share action dict
-    """
-    return {
-        'action_type': 'share',
-        'args': {
-            'recipient_agent_id': recipient_agent_id,
-            'resource_type': resource_type,
-            'quantity': quantity
-        }
-    }
-
-def noop():
-    """Create a no-operation action."""
-    return {'action_type': 'noop', 'args': {}}
-
 __all__ = [
     'SymbolicEnvWrapper',
     'SymbolicActionExecutor',
@@ -131,7 +65,6 @@ __all__ = [
     'SymbolicPlanLogger',
     'SymbolicPlanExecutor',
     'Agent',
-    'SimpleAgent',
     'MessageBroker',
     'visualize_plan_timeline',
     'visualize_all_agents_progress',
@@ -152,12 +85,4 @@ __all__ = [
     'save_metrics',
     'save_metrics_csv',
     'load_logs',
-    # Helper functions
-    'move',
-    'collect', 
-    'craft',
-    'place',
-    'sleep',
-    'share',
-    'noop'
 ]
