@@ -27,7 +27,6 @@ from .cognitive_agent import (
     extract_visible_area,
     parse_plan_response,
     parse_interrupt_response,
-    apply_repair_plan_recommendation,
 )
 from ..plan.plan import SymbolicPlan, SymbolicAction
 
@@ -185,18 +184,6 @@ class BaseLLMAgent(Agent):
             for agent_id in wait_ids
         )
 
-    def _finalize_generated_plan(
-        self,
-        plan: SymbolicPlan,
-        repair_messages: Optional[List[Dict]] = None,
-    ) -> SymbolicPlan:
-        """Apply shared post-processing to generated plans (COOP2 repair recommendations)."""
-        return apply_repair_plan_recommendation(
-            plan,
-            self.agent_id,
-            repair_messages,
-        )
-
     def _build_plan_prompt_messages(
         self,
         system_prompt: str,
@@ -229,11 +216,10 @@ class BaseLLMAgent(Agent):
     def _generate_plan_from_messages(
         self,
         prompt_messages: List[Dict],
-        repair_messages: Optional[List[Dict]] = None,
         label: str = "Plan Generation",
         verbose_prefix: str = "Calling LLM for plan...",
     ) -> SymbolicPlan:
-        """Call the LLM, parse a symbolic plan, and apply shared post-processing."""
+        """Call the LLM and parse the plan it commits; fall back to a fixed plan on failure."""
         if self._should_print_llm_io():
             self._print_llm_messages(label, prompt_messages)
 
@@ -253,7 +239,6 @@ class BaseLLMAgent(Agent):
                 env_step=self.env_step,
                 plan_id=self.plan_count + 1,
             )
-            plan = self._finalize_generated_plan(plan, repair_messages)
             if self.verbose:
                 print(f"  [{self.agent_id}] Plan: {plan.specification}")
             return plan
@@ -303,7 +288,6 @@ class BaseLLMAgent(Agent):
         )
         self.plan = self._generate_plan_from_messages(
             prompt_messages=prompt_messages,
-            repair_messages=messages,
             label=f"{self.role_name} Plan Generation".strip(),
             verbose_prefix=(
                 f"{self.role_name} calling LLM for plan..." if self.role_name else "Calling LLM for plan..."
@@ -388,10 +372,7 @@ class BaseLLMAgent(Agent):
             self._record_llm_error(e)
             if self.verbose:
                 print(f"  [{self.agent_id}] LLM repair intention error: {e}")
-            return super().describe_repair_intention(
-                repair_context=repair_context,
-                previous_statements=previous_statements,
-            )
+            raise
 
     def _repair_intention_system_prompt(self) -> str:
         """Role prompt plus the COOP2 repair-channel response rules."""
@@ -497,7 +478,7 @@ class BaseLLMAgent(Agent):
             if self.verbose:
                 print(f"  [{self.agent_id}] LLM decided: REPLAN")
             if new_plan is not None:
-                self.plan = self._finalize_generated_plan(new_plan)
+                self.plan = new_plan
                 if self.verbose:
                     print(f"    New plan: {self.plan.specification}")
                     print(f"    Actions: {[str(a) for a in self.plan.actions]}")

@@ -132,6 +132,7 @@ class MacrafterPredictionMixin:
                 temporal_tolerance,
             )
             selected_agents = sorted({event.agent_id for event in selected_events})
+            selected_agent_count = len(selected_agents)
             task_event_summary[task_id] = {
                 "planned_agents": planned_agents,
                 "selected_step": selected_step,
@@ -150,16 +151,17 @@ class MacrafterPredictionMixin:
                 ConstraintResult(
                     task_id=task_id,
                     constraint_type=ConstraintType.TEMPORAL,
-                    satisfied=len(selected_events) >= required_agents,
-                    score=len(selected_events) / required_agents,
+                    satisfied=selected_agent_count >= required_agents,
+                    score=selected_agent_count / required_agents,
                     agents=selected_agents or planned_agents,
                     reason=(
                         None
-                        if len(selected_events) >= required_agents
+                        if selected_agent_count >= required_agents
                         else (
                             f"Requires {required_agents} collect actions within "
                             f"{temporal_tolerance} primitive step(s), best predicted "
-                            f"window around step {selected_step} has {len(selected_events)}"
+                            f"window around step {selected_step} has "
+                            f"{selected_agent_count} distinct agent(s)"
                         )
                     ),
                     metadata={
@@ -173,21 +175,22 @@ class MacrafterPredictionMixin:
             distance_threshold = int(task_spec.metadata.get("distance_threshold", 1))
             spatial_tolerance = self.get_prediction_spatial_tolerance()
             effective_distance_threshold = distance_threshold + spatial_tolerance
-            spatial_agents = []
+            spatial_agents = set()
             for event in selected_events:
                 if task_position is None or event.position is None:
                     continue
                 distance = self._manhattan(event.position, task_position)
                 event.metadata["distance_to_task"] = distance
                 if distance <= effective_distance_threshold:
-                    spatial_agents.append(event.agent_id)
+                    spatial_agents.add(event.agent_id)
+            sorted_spatial_agents = sorted(spatial_agents)
             results.append(
                 ConstraintResult(
                     task_id=task_id,
                     constraint_type=ConstraintType.SPATIAL,
                     satisfied=len(spatial_agents) >= required_agents,
                     score=len(spatial_agents) / required_agents,
-                    agents=sorted(spatial_agents) or selected_agents or planned_agents,
+                    agents=sorted_spatial_agents or selected_agents or planned_agents,
                     reason=(
                         None
                         if len(spatial_agents) >= required_agents
@@ -213,7 +216,7 @@ class MacrafterPredictionMixin:
             required_tool_mode = getattr(task_state, "required_tool_mode", "all")
             if required_tool is None:
                 required_tool = list(task_spec.required_capabilities)
-            capable_agents = [
+            capable_agents = {
                 event.agent_id
                 for event in selected_events
                 if satisfies_tool_requirement(
@@ -221,7 +224,8 @@ class MacrafterPredictionMixin:
                     required_tool,
                     required_tool_mode,
                 )
-            ]
+            }
+            sorted_capable_agents = sorted(capable_agents)
             dependency_satisfied = (
                 not required_tool
                 or len(capable_agents) >= required_agents
@@ -232,7 +236,7 @@ class MacrafterPredictionMixin:
                     constraint_type=ConstraintType.DEPENDENCY,
                     satisfied=dependency_satisfied,
                     score=1.0 if not required_tool else len(capable_agents) / required_agents,
-                    agents=sorted(capable_agents) or selected_agents or planned_agents,
+                    agents=sorted_capable_agents or selected_agents or planned_agents,
                     reason=(
                         None
                         if dependency_satisfied

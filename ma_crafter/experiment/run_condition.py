@@ -188,6 +188,12 @@ def run_condition(args, llm_client: Optional[LLMClient] = None) -> Path:
     except KeyboardInterrupt:
         print("Interrupted by user")
 
+    for agent in agents.values():
+        agent.shutdown()
+    for thread in running_threads.values():
+        thread.join()
+    running_threads.clear()
+
     last_step = env.current_step
     print(f"Episode ended at step {last_step}" + (" by time limit" if timed_out else ""))
     env.terminate_unfinished_plans()

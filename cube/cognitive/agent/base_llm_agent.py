@@ -12,6 +12,7 @@ overrides the small ``_plan_*`` hooks for its team and context, and adds its
 communication flow on top of ``handle_reasoning`` / ``handle_interrupt``.
 """
 
+import json
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -28,7 +29,6 @@ from .cognitive_agent import (
     parse_interrupt_response,
 )
 from ..plan.plan import SymbolicPlan, SymbolicAction
-from ..coop2_messages import has_coop2_repair_message
 
 
 class BaseLLMAgent(Agent):
@@ -294,6 +294,88 @@ class BaseLLMAgent(Agent):
         )
 
     # ------------------------------------------------------------------
+    # COOP2 repair round
+    # ------------------------------------------------------------------
+    def describe_repair_intention(
+        self,
+        repair_context: Dict[str, Any],
+        previous_statements: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Generate one concise statement for the ordered COOP2 repair round."""
+        previous_statements = previous_statements or []
+        if self.plan is None:
+            plan_text = "Current plan: none"
+        else:
+            remaining = self.plan.actions[self.plan.current_action_index:]
+            actions = "\n".join(
+                f"  {index}. {action}"
+                for index, action in enumerate(
+                    remaining,
+                    start=self.plan.current_action_index + 1,
+                )
+            )
+            plan_text = (
+                f"Current plan #{self.plan.plan_id}: {self.plan.specification}\n"
+                f"{actions or '  no remaining actions'}"
+            )
+
+        user_prompt = "\n".join(
+            [
+                "You are participating in a COOP2 repair channel.",
+                "Agents speak once in ascending agent-id order. Later agents can see earlier statements.",
+                "State only what you intend to do or change for the predicted failure.",
+                "Be concrete and concise; prefer the shared target and timing implied by the repair context.",
+                "",
+                f"You are: {self.agent_id}",
+                f"Environment step: {self.env_step}",
+                "",
+                "Predicted repair context:",
+                json.dumps(repair_context, indent=2, default=str),
+                "",
+                "Current symbolic view:",
+                self.symbolic_view or "unknown",
+                "",
+                "Previous repair statements:",
+                json.dumps(previous_statements, indent=2, default=str),
+                "",
+                "Your current plan:",
+                plan_text,
+                "",
+                "Write your repair intention in 1-3 sentences.",
+            ]
+        )
+        messages = [
+            {"role": "system", "content": self._repair_intention_system_prompt()},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            response, usage = self.llm_client.generate(
+                messages=messages,
+                response_format=None,
+                temperature=self.temperature,
+            )
+            self._record_llm_usage(usage)
+            return str(response).strip()
+        except Exception as exc:
+            self._record_llm_error(exc)
+            if self.verbose:
+                print(f"  [{self.agent_id}] LLM repair intention error: {exc}")
+            raise
+
+    def _repair_intention_system_prompt(self) -> str:
+        """Role prompt plus the COOP2 repair-channel response rules."""
+        repair_rules = "\n".join(
+            [
+                "COOP2 repair-channel response rules:",
+                "- Keep the role and communication structure from the prompt above.",
+                "- State only your repair intention for the current predicted failure.",
+                "- Do not assign yourself or others a new permanent role.",
+            ]
+        )
+        return f"{self._get_system_prompt()}\n\n{repair_rules}"
+
+    # ------------------------------------------------------------------
     # Reasoning and interrupted stages
     # ------------------------------------------------------------------
     def _handle_coop2_repair_interrupt(self, messages: Optional[List[Dict]] = None) -> bool:
@@ -304,10 +386,10 @@ class BaseLLMAgent(Agent):
         request. Returns True when a repair request was handled.
         """
         if messages is None:
-            if not has_coop2_repair_message(self.get_messages(clear_buffer=False)):
+            if not self.has_coop2_repair_request(self.get_messages(clear_buffer=False)):
                 return False
             messages = self.get_messages(clear_buffer=True)
-        elif not has_coop2_repair_message(messages):
+        elif not self.has_coop2_repair_request(messages):
             return False
 
         if self.verbose:

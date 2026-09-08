@@ -324,7 +324,10 @@ def _format_compact_mapping(value: Any, max_chars: int = 220) -> str:
     return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
 
 
-def format_coop2_repair_context(messages: Optional[List[Dict]]) -> str:
+def format_coop2_repair_context(
+    messages: Optional[List[Dict]],
+    agent_id: Optional[str] = None,
+) -> str:
     """Format structured repair evidence for replanning."""
     context = get_coop2_repair_context(messages)
     if not context:
@@ -355,9 +358,21 @@ def format_coop2_repair_context(messages: Optional[List[Dict]]) -> str:
                 lines.append(f"  use navigate timeout at least {timeout} for this repair target")
         recommended_plans = guidance.get("recommended_plans") or {}
         if recommended_plans:
-            lines.append("  recommended per-agent plan skeletons:")
-            for agent_id, plan in list(recommended_plans.items())[:6]:
-                lines.append(f"    - {agent_id}: {_format_compact_mapping(plan, 700)}")
+            own_plan = recommended_plans.get(str(agent_id)) if agent_id is not None else None
+            if own_plan:
+                lines.append(
+                    "  RECOMMENDED PLAN FOR YOU (advisory): "
+                    f"{_format_compact_mapping(own_plan, 900)}"
+                )
+            other_plans = [
+                (other_id, plan)
+                for other_id, plan in recommended_plans.items()
+                if str(other_id) != str(agent_id)
+            ]
+            if other_plans:
+                lines.append("  recommended teammate plans:")
+                for other_id, plan in other_plans[:5]:
+                    lines.append(f"    - {other_id}: {_format_compact_mapping(plan, 700)}")
         policy = guidance.get("recommendation_policy")
         if policy:
             lines.append(f"  recommendation policy: {policy}")
@@ -430,6 +445,7 @@ def format_coop2_repair_instruction(messages: Optional[List[Dict]]) -> str:
         "COOP2 REPAIR OBJECTIVE:",
         "- Repair the predicted failure while keeping your system/topology role.",
         "- Use the evidence and repair guidance as recommendations; preserve useful progress from previous plans.",
+        "- Generate and commit your own final plan. The recommended plan is context, not an enforced replacement.",
         "- If guidance names a shared target, participants, or timeout, prefer those values unless current observation makes them infeasible.",
         "- For spatial/temporal failures, converge on one object_id and synchronize collect.",
         "- For dependency failures, get the required tools/resources first; ready agents may move to the target and wait.",
@@ -574,7 +590,7 @@ def build_observation_prompt(
             parts.append(f"  From {sender}: {content}")
         parts.append("")
 
-    repair_context = format_coop2_repair_context(messages)
+    repair_context = format_coop2_repair_context(messages, agent_id=agent_id)
     if repair_context:
         parts.append(repair_context)
         parts.append("")

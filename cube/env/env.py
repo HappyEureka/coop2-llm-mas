@@ -560,15 +560,9 @@ class CoopBlockPush(ParallelEnv):
             if 0 <= nr < self.K and 0 <= nc < self.K:
                 if self._occupied[nr, nc] == 0:  # Free cell
                     self._agent_positions[agent] = (nr, nc)
-                elif self._occupied[nr, nc] == 1:  # Another agent - resolve by ID
-                    other_agent = pos_to_agent.get((nr, nc))
-                    if other_agent and self.agent_name_mapping[agent] < self.agent_name_mapping[other_agent]:
-                        # This agent has smaller ID, can move
-                        self._agent_positions[agent] = (nr, nc)
-                        # Move other agent back if possible
-                        or_, oc = self._agent_positions[other_agent]
-                        if self._occupied[or_, oc] == 0:
-                            self._agent_positions[other_agent] = (or_, oc)
+                # Occupied agent cells are not traversable. Allowing the move
+                # would put two agents at one coordinate and make task-tracker
+                # participation disagree with the push engine's force count.
 
         # Rebuild occupancy
         self._rebuild_occupied()

@@ -29,6 +29,8 @@ def visualize_repair_interventions(
         agent_focus_csv_path=output.with_name(f"{output.stem}_agent_focus.csv"),
         title=None,
         show_repair=True,
+        show_title=False,
+        show_summary=False,
     )
 
 

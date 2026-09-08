@@ -9,7 +9,6 @@ This module provides utilities for:
 from typing import Any, Optional, List, Dict
 
 from ..plan.plan import SymbolicPlan, SymbolicAction
-from ..coop2_messages import get_coop2_repair_context
 from .prompts import (
     build_system_prompt,
     build_observation_prompt,
@@ -351,53 +350,6 @@ def parse_plan_response(
         agent_id=agent_id,
         created_at_step=env_step
     )
-
-
-def apply_repair_plan_recommendation(
-    plan: SymbolicPlan,
-    agent_id: str,
-    repair_messages: Optional[List[Dict]] = None,
-) -> SymbolicPlan:
-    """Commit the adapter-provided COOP2 repair skeleton for this agent, if present."""
-    context = get_coop2_repair_context(repair_messages)
-    if not context:
-        return plan
-
-    guidance = context.get("repair_guidance") or {}
-    recommended_plans = guidance.get("recommended_plans") or {}
-    recommended = recommended_plans.get(str(agent_id))
-    if not isinstance(recommended, dict):
-        return plan
-
-    actions = []
-    for raw_action in recommended.get("actions") or []:
-        if not isinstance(raw_action, dict):
-            continue
-        action_type = raw_action.get("action_type")
-        if not action_type:
-            continue
-        args = raw_action.get("args") if isinstance(raw_action.get("args"), dict) else {}
-        actions.append(SymbolicAction(str(action_type), dict(args)))
-
-    if not actions:
-        return plan
-
-    plan.specification = str(recommended.get("task") or plan.specification)
-    plan.actions = actions
-    plan.current_action_index = 0
-    if not isinstance(getattr(plan, "metadata", None), dict):
-        plan.metadata = {}
-    plan.metadata["coop2_repair_recommended"] = True
-    plan.metadata["coop2_repair_step"] = context.get("env_step")
-    plan.metadata["coop2_repair_task"] = plan.specification
-    target = guidance.get("recommended_target") or {}
-    if isinstance(target, dict):
-        plan.metadata["coop2_repair_target"] = {
-            "target_id": target.get("target_id") or target.get("task_id"),
-            "target_type": target.get("target_type"),
-            "recommended_participants": target.get("recommended_participants") or [],
-        }
-    return plan
 
 
 def _collect_task_args(task_spec: TaskSpecification) -> Dict[str, Any]:

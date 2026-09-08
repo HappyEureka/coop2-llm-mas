@@ -161,7 +161,7 @@ def run_parallel(args, runs: list[dict], manifest_dir: Path, manifest_path: Path
             )
 
             log_name = (
-                f"{run['index']:03d}_{run['topology']}_agents{run['agents']}_"
+                f"{run['index']:03d}_repeat{run['repeat']}_{run['topology']}_agents{run['agents']}_"
                 f"repair{'on' if run['repair'] else 'off'}_seed{run['seed']}.log"
             )
             log_path = runner_logs_dir / log_name
@@ -262,6 +262,12 @@ def main() -> int:
     )
     parser.add_argument("--agent-counts", type=parse_int_list, default=parse_int_list("3,6"))
     parser.add_argument("--seeds", type=parse_int_list, default=parse_int_list("42"))
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Independent LLM repeats for each condition and environment seed.",
+    )
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--time-limit-seconds", type=float, default=150)
     parser.add_argument("--model", type=str, default="gpt-5.4-mini")
@@ -318,20 +324,22 @@ def main() -> int:
 
     runs = []
     index = 1
-    for seed in args.seeds:
-        for topology in args.topologies:
-            for agent_count in args.agent_counts:
-                for repair_enabled in repair_modes:
-                    command = build_command(args, topology, agent_count, repair_enabled, seed)
-                    runs.append({
-                        "index": index,
-                        "topology": topology,
-                        "agents": agent_count,
-                        "repair": repair_enabled,
-                        "seed": seed,
-                        "command": command,
-                    })
-                    index += 1
+    for repeat in range(1, max(1, args.repeats) + 1):
+        for seed in args.seeds:
+            for topology in args.topologies:
+                for agent_count in args.agent_counts:
+                    for repair_enabled in repair_modes:
+                        command = build_command(args, topology, agent_count, repair_enabled, seed)
+                        runs.append({
+                            "index": index,
+                            "repeat": repeat,
+                            "topology": topology,
+                            "agents": agent_count,
+                            "repair": repair_enabled,
+                            "seed": seed,
+                            "command": command,
+                        })
+                        index += 1
 
     print(f"Planned runs: {len(runs)}")
     manifest_path = manifest_dir / f"manifest_{safe_model}.json"

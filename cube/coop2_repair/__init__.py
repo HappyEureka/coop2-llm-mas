@@ -1,4 +1,15 @@
-"""COOP2-Repair support for the CUBE block-pushing environment."""
+"""COOP2-Repair for CUBE.
+
+The environment-independent core (plan views, predictor, evaluator, repair
+controller, message protocol) lives in ../../coop2_repair_core and is shared
+with MA-Crafter. It is added to this package's search path below, so
+``coop2_repair.core`` and friends resolve to the shared files. This package
+adds the CUBE adapter.
+"""
+
+from pathlib import Path
+
+__path__.append(str(Path(__file__).resolve().parents[2] / "coop2_repair_core"))
 
 from .core import (
     ActionOutcome,

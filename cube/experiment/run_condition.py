@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -59,14 +59,15 @@ def _role_for_agent(topology: str, agent_id: str, agent) -> str:
     return topology
 
 
-def _agent_usage(agent) -> Dict[str, int]:
-    return {
-        "plan_count": int(getattr(agent, "plan_count", 0)),
-        "api_calls": int(getattr(agent, "api_calls", 0)),
-        "total_tokens": int(getattr(agent, "total_tokens_used", 0)),
-        "prompt_tokens": int(getattr(agent, "prompt_tokens", 0)),
-        "completion_tokens": int(getattr(agent, "completion_tokens", 0)),
-    }
+def _agent_usage(agent) -> Dict[str, Any]:
+    usage = dict(agent.get_usage_stats()) if hasattr(agent, "get_usage_stats") else {}
+    usage.setdefault("api_calls", int(getattr(agent, "api_calls", 0)))
+    usage.setdefault("total_tokens", int(getattr(agent, "total_tokens_used", 0)))
+    usage.setdefault("prompt_tokens", int(getattr(agent, "prompt_tokens", 0)))
+    usage.setdefault("completion_tokens", int(getattr(agent, "completion_tokens", 0)))
+    usage.setdefault("llm_errors", 0)
+    usage["plan_count"] = int(getattr(agent, "plan_count", 0))
+    return usage
 
 
 def _save_llm_usage(output_dir: Path, topology: str, agents: Dict[str, object], llm_client: LLMClient, args, timed_out: bool) -> None:
@@ -76,6 +77,7 @@ def _save_llm_usage(output_dir: Path, topology: str, agents: Dict[str, object], 
         "total_tokens": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "total_llm_errors": 0,
     }
     for agent_id, agent in agents.items():
         usage = _agent_usage(agent)
@@ -85,6 +87,7 @@ def _save_llm_usage(output_dir: Path, topology: str, agents: Dict[str, object], 
         totals["total_tokens"] += usage["total_tokens"]
         totals["prompt_tokens"] += usage["prompt_tokens"]
         totals["completion_tokens"] += usage["completion_tokens"]
+        totals["total_llm_errors"] += int(usage.get("llm_errors", 0))
 
     data = {
         "model": llm_client.model,
@@ -193,6 +196,12 @@ def run_condition(args, llm_client: Optional[LLMClient] = None) -> Path:
 
     except KeyboardInterrupt:
         print("Interrupted by user")
+
+    for agent in agents.values():
+        agent.shutdown()
+    for thread in running_threads.values():
+        thread.join()
+    running_threads.clear()
 
     print(f"Episode ended at step {env.current_step}" + (" by time limit" if timed_out else ""))
     env.terminate_unfinished_plans()

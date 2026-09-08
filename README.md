@@ -14,7 +14,8 @@ Project page: <https://happyeureka.github.io/coop2/>
 | `ma_crafter/` | MA-Crafter environment, agents, COOP² adapter, repair logic, and experiments |
 | `*/cognitive/` | The cognitive side of COOP²: agents, symbolic plans, communication, grounding, process records, and metrics |
 | `*/comm_topology/` | Individual, centralized, and Broadcast Chain communication structures |
-| `*/coop2_repair/` | COOP²-Repair evaluation, messaging, and environment-specific plan-effect adapters |
+| `coop2_repair_core/` | Environment-independent COOP²-Repair: plan views, predictor, evaluator, repair controller, message protocol (one shared copy) |
+| `*/coop2_repair/` | Environment-specific COOP²-Repair adapters (plan-effect estimates, repair guidance); each package adds the shared core to its search path |
 | `*/experiment/` | Paper experiment runners and scripts for tables and figures |
 
 Generated traces, figures, tables, videos, and API credentials are excluded from version control. New runs write to a timestamped results directory unless `--output-root` is supplied.
@@ -60,7 +61,7 @@ python experiment/run_grid.py \
   --dry-run
 ```
 
-Remove `--dry-run` to execute. To compare the repair case study against its matched baseline, use `--repair both`.
+Remove `--dry-run` to execute. To compare the repair case study against its matched baseline, use `--repair both`. Add `--repeats N` for N independent LLM repeats of every condition and seed.
 
 ### MA-Crafter
 
@@ -79,6 +80,20 @@ python experiment/run_grid.py \
 Remove `--dry-run` to execute. Use `--repair both` for matched repair-off and repair-on conditions.
 
 `--max-concurrent-agents` is a weighted concurrency budget. A six-agent run consumes six slots. The default value of `1` runs conditions sequentially.
+
+### Smoke check with a real backend
+
+After setup and credentials, run one short condition per environment before launching a grid. Each run makes a few dozen API calls and takes a minute or two.
+
+```bash
+cd cube && python experiment/run_condition.py --topology centralized --agents 3 --steps 30 --time-limit-seconds 120 --model your-deployment-name --output-root /tmp/coop2-smoke
+```
+
+```bash
+cd ma_crafter && python experiment/run_condition.py --topology centralized --agents 3 --steps 30 --time-limit-seconds 120 --model your-deployment-name --output-root /tmp/coop2-smoke
+```
+
+A healthy run prints a results directory containing `coop2_metrics.json`, and its `llm_usage.json` shows `total_api_calls` above zero with `total_llm_errors` at zero. The unit tests (`python -m unittest discover tests` in either environment) cover the same code paths with a scripted LLM and need no credentials.
 
 ## Communication structure names
 
@@ -185,7 +200,9 @@ COOP²-Repair
 └── targeted repair messages
 ```
 
-The shared flow is implemented by `coop2_repair/repair_controller.py`, `coop2_repair/evaluator.py`, and `coop2_repair/message_protocol.py`. The environment adapters provide the plan-effect estimates and repair guidance that depend on the domain.
+The shared flow is implemented once, in `coop2_repair_core/` (`repair_controller.py`, `evaluator.py`, `message_protocol.py`). Each environment's `coop2_repair` package adds that directory to its search path and contributes the adapter that provides the plan-effect estimates and repair guidance for its domain.
+
+When a failure is predicted, the affected agents hold one ordered repair round: each agent's LLM states its intention in agent-id order, seeing the earlier statements. The transcript, the predicted failures, all committed plan views, and the adapter's guidance are then delivered as a repair message; every agent in the channel is interrupted and commits a revised plan before the next primitive step. Recommended plans in the guidance are advisory context for the LLM, not enforced replacements, and a repaired task enters a cooldown so the same task is not repaired again immediately.
 
 The paper demonstrates this repair flow as a case study of what the COOP² formulation makes possible. Applying it to another domain requires three additional pieces beyond the base environment integration:
 

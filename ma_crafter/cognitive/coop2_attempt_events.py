@@ -122,6 +122,7 @@ def extract_attempt_constraint_events_from_entry(entry: Dict[str, Any]) -> List[
 def aggregate_attempt_violation_rates(events: Iterable[Dict[str, Any]]) -> Dict[str, float]:
     """Aggregate attempt-event scores into violation-rate columns."""
     event_list = list(events or [])
+    successful_attempts = sum(1 for event in event_list if event.get("success"))
     totals = {constraint: 0 for constraint in ATTEMPT_CONSTRAINTS}
     deficits = {constraint: 0.0 for constraint in ATTEMPT_CONSTRAINTS}
 
@@ -133,7 +134,11 @@ def aggregate_attempt_violation_rates(events: Iterable[Dict[str, Any]]) -> Dict[
             totals[constraint] += 1
             deficits[constraint] += max(0.0, 1.0 - min(_safe_float(scores[constraint]), 1.0))
 
-    rates: Dict[str, float] = {"attempt_constraint_events": float(len(event_list))}
+    rates: Dict[str, float] = {
+        "attempt_constraint_events": float(len(event_list)),
+        "successful_attempt_events": float(successful_attempts),
+        "attempt_success_rate": successful_attempts / len(event_list) if event_list else 0.0,
+    }
     for constraint in ATTEMPT_CONSTRAINTS:
         total = totals[constraint]
         violation_rate = deficits[constraint] / total if total else 0.0

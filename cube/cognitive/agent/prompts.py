@@ -5,8 +5,11 @@ This module provides clean, modular functions for building prompts
 that describe the environment, agent states, and observations.
 """
 
+import json
 from typing import Dict, List, Any, Optional
 from enum import Enum
+
+from ..coop2_messages import get_coop2_repair_context, is_coop2_repair_content
 
 
 # ============================================================================
@@ -326,11 +329,11 @@ def build_system_prompt(
         parts.append("")
     
     # Available tasks
-    parts.append("""AVAILABLE TASKS (choose one as your plan's goal):
-- deliver_block: Move a specific block to the goal column
-- coordinate_push: Coordinate agents on the same block face
-- approach_block: Move to the left push cells of a block
-- wait_for_others: Wait briefly for teammates to arrive""")
+    parts.append("""AVAILABLE TASKS (the task field must use exactly one of these names):
+- push_block: Move a specific block toward the goal, including approaching or delivering it
+- coordinate: Coordinate agents on the same block face
+- wait: Wait briefly for teammates to arrive
+Represent the task as an object such as {"task": "push_block", "block_id": 0}, not as a bare string.""")
     parts.append("")
     
     # Available actions
@@ -460,12 +463,22 @@ def build_observation_prompt(
             parts.append("")
     
     # Messages from other agents (current step - may overlap with memory)
-    if messages:
+    regular_messages = [
+        message
+        for message in messages or []
+        if not is_coop2_repair_content(message.get("content"))
+    ]
+    if regular_messages:
         parts.append("MESSAGES RECEIVED:")
-        for msg in messages:
+        for msg in regular_messages:
             sender = msg.get('sender', 'unknown')
             content = msg.get('content', '')
             parts.append(f"  From {sender}: {content}")
+        parts.append("")
+
+    repair_context = format_coop2_repair_context(messages, agent_id)
+    if repair_context:
+        parts.append(repair_context)
         parts.append("")
     
     parts.append("""Generate a short plan to maximize delivery score.
@@ -478,6 +491,74 @@ Guidelines:
 - Avoid wait-only plans.""")
     
     return "\n".join(parts)
+
+
+def _compact_json(value: Any, max_chars: int = 800) -> str:
+    text = json.dumps(value, sort_keys=True, default=str)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
+def format_coop2_repair_context(
+    messages: Optional[List[Dict]],
+    agent_id: str,
+) -> str:
+    """Present adapter guidance as evidence for the agent's own plan decision."""
+    context = get_coop2_repair_context(messages)
+    if not context:
+        return ""
+
+    guidance = context.get("repair_guidance") or {}
+    lines = [
+        "COOP2 REPAIR CONTEXT:",
+        f"- Repair step: {context.get('env_step', '?')}",
+    ]
+
+    failures = context.get("failures") or []
+    if failures:
+        lines.append("- Predicted constraint failures:")
+        for failure in failures[:6]:
+            task_id = failure.get("task_id") or failure.get("task") or "unknown"
+            constraint = failure.get("constraint_type") or "unknown"
+            reason = failure.get("reason") or failure.get("details") or ""
+            lines.append(f"  - {task_id}: {constraint}; {reason}")
+
+    recommended = (guidance.get("recommended_plans") or {}).get(str(agent_id))
+    if recommended:
+        lines.append(
+            "- RECOMMENDED PLAN FOR YOU (advisory): "
+            f"{_compact_json(recommended)}"
+        )
+
+    teammate_plans = [
+        (other_id, plan)
+        for other_id, plan in (guidance.get("recommended_plans") or {}).items()
+        if str(other_id) != str(agent_id)
+    ]
+    if teammate_plans:
+        lines.append("- Recommended teammate assignments:")
+        for other_id, plan in teammate_plans[:5]:
+            lines.append(f"  - {other_id}: {_compact_json(plan, 500)}")
+
+    statements = (context.get("repair_channel") or {}).get("statements") or []
+    if statements:
+        lines.append("- Ordered repair-channel statements:")
+        for statement in statements:
+            lines.append(
+                f"  - {statement.get('agent_id', '?')}: "
+                f"{str(statement.get('statement', '')).strip()}"
+            )
+
+    policy = guidance.get("recommendation_policy")
+    if policy:
+        lines.append(f"- Recommendation policy: {policy}")
+    lines.extend(
+        [
+            "- Generate and commit your own final plan.",
+            "- The recommendation is context, not an enforced replacement.",
+            "- Prefer it when feasible; otherwise repair the same predicted failure using current observations.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def build_message_prompt(

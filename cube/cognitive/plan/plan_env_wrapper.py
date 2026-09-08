@@ -18,6 +18,7 @@ from coop2_repair import (
 from ..action.action_env_wrapper import SymbolicEnvWrapper
 from .plan import SymbolicPlan, SymbolicPlanExecutor, SymbolicPlanLogger
 from .coop2_process_logger import Coop2ProcessLogger
+from .coop2_repair_dispatcher import Coop2RepairDispatcher
 from ..agent import Agent
 
 
@@ -101,6 +102,10 @@ class PlanningEnvWrapper:
             agent_names=self.agent_names,
             agents=self.agents,
             coop2_adapter=self.coop2_adapter,
+        )
+        self.coop2_repair_dispatcher = Coop2RepairDispatcher(
+            agents=self.agents,
+            message_broker_getter=lambda: self._message_broker,
         )
         
         # Message broker for coordinated message handling (created when agents are set)
@@ -308,7 +313,7 @@ class PlanningEnvWrapper:
                 agents=self.agents,
                 env_step=self._current_step,
                 current_info=getattr(self, "_current_info", None),
-                message_broker=self._message_broker,
+                repair_dispatcher=self.coop2_repair_dispatcher.dispatch,
             )
             if evaluation is not None and evaluation.should_repair:
                 return self._idle_step_return(
@@ -325,6 +330,18 @@ class PlanningEnvWrapper:
         # Get next action from each agent's current plan
         actions = {}
         for agent_id in self.agent_names:
+            agent = self.agents[agent_id]
+            plan = agent.plan if agent is not None else None
+            old_plan = self.logger.current_plans.get(agent_id)
+            if (
+                plan is not None
+                and plan.status.value == "pending"
+                and old_plan is not None
+                and old_plan is not plan
+            ):
+                self.symbolic_env.agent_actions[agent_id].cancel_current_action(
+                    "plan_replaced"
+                )
             action = self.plan_executors[agent_id].step(
                 observation=self._current_obs[agent_id],
                 env_step=self._current_step,

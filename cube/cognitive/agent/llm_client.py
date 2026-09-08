@@ -14,7 +14,7 @@ from enum import Enum
 
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI, RateLimitError, APIError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # Load local credentials without overriding variables exported by the caller.
@@ -118,6 +118,33 @@ class LLMPlanResponse(BaseModel):
     task: TaskSpecification = Field(description="The task specification with type and optional target object")
     actions: List[LLMAction] = Field(description="List of actions to execute")
     reasoning: str = Field(description="Brief explanation of why this plan was chosen")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_task_shorthand(cls, data):
+        """Accept a task name shorthand when its block ID is present in the actions."""
+        if not isinstance(data, dict) or not isinstance(data.get("task"), str):
+            return data
+
+        block_id = None
+        for action in data.get("actions", []):
+            if not isinstance(action, dict):
+                continue
+            if "block_id" in action:
+                block_id = action["block_id"]
+                break
+            if action.get("entity_type") == "block" and "entity_id" in action:
+                block_id = action["entity_id"]
+                break
+        if block_id is None:
+            return data
+
+        normalized = dict(data)
+        normalized["task"] = {
+            "task": data["task"],
+            "block_id": block_id,
+        }
+        return normalized
 
 
 class LLMMessageResponse(BaseModel):

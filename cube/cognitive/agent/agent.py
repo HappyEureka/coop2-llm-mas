@@ -11,6 +11,7 @@ from typing import Any, Optional, List, Dict, Union
 from enum import Enum
 import time
 from ..plan.plan import SymbolicPlan
+from ..coop2_messages import has_coop2_repair_message
 from .memory import AgentMemory
 
 
@@ -445,6 +446,38 @@ class Agent(ABC):
         """Check if there are unread messages in the buffer."""
         return len(self.message_buffer) > 0
     
+    def has_coop2_repair_request(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """Return True when buffered messages include a COOP2 repair request."""
+        messages = self.message_buffer if messages is None else messages
+        return has_coop2_repair_message(messages)
+
+    def describe_repair_intention(
+        self,
+        repair_context: Dict[str, Any],
+        previous_statements: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Summarize this agent's current intent for an ordered repair round."""
+        previous_count = len(previous_statements or [])
+        if self.plan is None:
+            plan_summary = "I do not currently have a committed plan."
+        else:
+            remaining_actions = self.plan.actions[self.plan.current_action_index:]
+            action_text = ", ".join(str(action) for action in remaining_actions)
+            if not action_text:
+                action_text = "no remaining actions"
+            plan_summary = (
+                f"I currently intend to follow plan #{self.plan.plan_id}: "
+                f"{self.plan.specification}. Remaining actions: {action_text}."
+            )
+        failure_count = len(repair_context.get("failures", []))
+        return (
+            f"{plan_summary} I see {failure_count} predicted cooperative "
+            f"constraint failure(s) and {previous_count} prior repair statement(s)."
+        )
+
     def interrupt(self, timestamp: float = None, env_step: int = None):
         """
         Interrupt the agent (called when receiving messages during W or X state).

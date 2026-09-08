@@ -170,6 +170,22 @@ class SymbolicActionExecutor:
             self.action_history.append(self.current_symbolic_action)
             self.current_symbolic_action = None
     
+    def cancel_current_action(self, reason: str = "plan_replaced"):
+        """Discard multi-step executor state when a committed plan is replaced."""
+        if self.current_symbolic_action is not None:
+            self.complete_current_action(SymbolicActionStatus.FAILED, reason)
+        self.move_steps_remaining = 0
+        self.move_direction = None
+        self.wait_steps_remaining = 0
+        self.navigate_steps_remaining = 0
+        self.navigate_entity_type = None
+        self.navigate_entity_id = None
+        self.push_steps_remaining = 0
+        self.push_block_id = None
+        self.push_direction = None
+        self.push_had_success = False
+        self.last_push_failure_reason = None
+
     def update_env_step(self, step: int):
         """Update the current environment step counter."""
         self.current_env_step = step
@@ -529,7 +545,6 @@ class SymbolicActionExecutor:
 
         blocked = set(blocked_cells)
         blocked.discard(agent_pos)
-        blocked -= target_set
 
         queue = deque([(agent_pos, None)])
         visited = {agent_pos}

@@ -11,11 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .core import AgentPlanView, Coop2TraceLogger
 from .evaluator import PreExecutionConstraintEvaluator, PreExecutionEvaluation
-from .message_protocol import (
-    COOP2_REPAIR_CONTENT_TYPE,
-    COOP2_REPAIR_SENDER_ID,
-    coop2_repair_metadata,
-)
+from .message_protocol import COOP2_REPAIR_CONTENT_TYPE
 
 
 class Coop2RepairController:
@@ -75,7 +71,6 @@ class Coop2RepairController:
         env_step: int,
         agents: Optional[Dict[str, Any]] = None,
         current_info: Optional[Dict[str, Any]] = None,
-        message_broker: Optional[Any] = None,
         plan_views: Optional[Sequence[AgentPlanView]] = None,
         repair_dispatcher: Optional[Any] = None,
     ) -> Optional[PreExecutionEvaluation]:
@@ -98,7 +93,6 @@ class Coop2RepairController:
                 self._begin_repair(
                     evaluation=self._last_evaluation,
                     env_step=env_step,
-                    message_broker=message_broker,
                     repair_dispatcher=repair_dispatcher,
                 )
             return self._last_evaluation
@@ -133,7 +127,6 @@ class Coop2RepairController:
         self._begin_repair(
             evaluation=evaluation,
             env_step=env_step,
-            message_broker=message_broker,
             repair_dispatcher=repair_dispatcher,
         )
         return evaluation
@@ -339,13 +332,25 @@ class Coop2RepairController:
         self,
         evaluation: PreExecutionEvaluation,
         env_step: int,
-        message_broker: Optional[Any] = None,
         repair_dispatcher: Optional[Any] = None,
     ):
         """Send structured repair context to affected agents."""
-        affected_agents = sorted(
-            set(evaluation.affected_agents)
-            | {view.agent_id for view in evaluation.plan_views}
+        if repair_dispatcher is None:
+            raise RuntimeError(
+                "COOP2 repair requires an ordered repair dispatcher"
+            )
+        available_agents = sorted({
+            view.agent_id for view in evaluation.plan_views
+        })
+        repair_guidance = self._build_repair_guidance(
+            evaluation=evaluation,
+            affected_agents=available_agents,
+            env_step=env_step,
+        )
+        affected_agents = self._repair_channel_agents(
+            evaluation=evaluation,
+            repair_guidance=repair_guidance,
+            available_agents=available_agents,
         )
         repair_context = {
             "type": COOP2_REPAIR_CONTENT_TYPE,
@@ -354,11 +359,6 @@ class Coop2RepairController:
             "plan_views": [view.to_dict() for view in evaluation.plan_views],
             "message": "Committed plans are predicted to violate cooperative constraints. Replan or coordinate before execution.",
         }
-        repair_guidance = self._build_repair_guidance(
-            evaluation=evaluation,
-            affected_agents=affected_agents,
-            env_step=env_step,
-        )
         if repair_guidance:
             repair_context["repair_guidance"] = repair_guidance
 
@@ -369,20 +369,11 @@ class Coop2RepairController:
             evaluation=evaluation.to_dict(),
         )
 
-        if repair_dispatcher is not None:
-            repair_dispatcher(
-                affected_agents=affected_agents,
-                repair_context=repair_context,
-                env_step=env_step,
-            )
-        elif message_broker is not None:
-            message_broker.send_message(
-                sender_id=COOP2_REPAIR_SENDER_ID,
-                recipients=affected_agents,
-                content=repair_context,
-                metadata=coop2_repair_metadata(),
-                env_step=env_step,
-            )
+        repair_dispatcher(
+            affected_agents=affected_agents,
+            repair_context=repair_context,
+            env_step=env_step,
+        )
 
         self._log(
             "repair_message",
@@ -390,6 +381,37 @@ class Coop2RepairController:
             affected_agents=affected_agents,
             content=repair_context,
         )
+
+    def _repair_channel_agents(
+        self,
+        evaluation: PreExecutionEvaluation,
+        repair_guidance: Dict[str, Any],
+        available_agents: Sequence[str],
+    ) -> List[str]:
+        """Select the smallest recommended cohort for the repair round."""
+        available = {str(agent_id) for agent_id in available_agents}
+        recommended = set()
+
+        recommended_plans = repair_guidance.get("recommended_plans") or {}
+        if isinstance(recommended_plans, dict):
+            recommended.update(str(agent_id) for agent_id in recommended_plans)
+
+        recommended_target = repair_guidance.get("recommended_target") or {}
+        if isinstance(recommended_target, dict):
+            for key in ("recommended_participants", "participants"):
+                participants = recommended_target.get(key) or []
+                recommended.update(str(agent_id) for agent_id in participants)
+
+        selected = sorted(recommended & available)
+        if selected:
+            return selected
+
+        selected = sorted({
+            str(agent_id)
+            for agent_id in evaluation.affected_agents
+            if str(agent_id) in available
+        })
+        return selected or sorted(available)
 
     def _log(
         self,
